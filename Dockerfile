@@ -19,6 +19,10 @@ RUN apt-get update && apt-get install -y \
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Install llama-cpp-python ONLY in the Docker image
+RUN pip install --no-cache-dir llama-cpp-python
+
+
 # Expose the Streamlit default port
 EXPOSE 8501
 

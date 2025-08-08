@@ -1,3 +1,49 @@
+# Add these to your .dockerignore:
+
+# Python virtual environments
+.venv/
+env/
+venv/
+intern/
+
+# Common IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Model files (do NOT bundle heavy GGUF in images)
+models/models/*.gguf
+*.ckpt
+*.pt
+*.pth
+
+# FAISS/index/data artifacts
+*.index
+*.npy
+*.pkl
+*.bin
+*.npz
+
+# Data (keep only sample/configs if needed)
+data/*
+!data/cpc_labels.json
+
+# Output/generated files
+*.pdf
+*.docx
+generated_patent.*
+
+# Llama.cpp builds/binaries if present
+llama.cpp/build/
+llama.cpp/bin/
+llama.cpp/llama-cli
+llama.cpp/main
+
+# Log files
+*.log
+
+# Existing ignores from you
 __pycache__/
 *.pyc
 *.pyo
