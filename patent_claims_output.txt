@@ -1,0 +1,79 @@
+WE CLAIM
+
+1. An IoT based agricultural monitoring system for precision farming, comprising:
+ 1. a plurality of soil moisture sensors positioned at multiple depths within the soil;
+ 20(a) each sensor configured to measure and transmit real-time data on soil moisture levels;
+ 30(i) wherein 20(a) operates in conjunction with temperature, humidity, and ambient air pressure sensors for comprehensive environmental monitoring;
+ 1. a central processing unit (CPU) configured to receive sensor inputs from the plurality of soil moisture sensors via wireless communication module supporting WiFi and LoRaWAN protocols; 5
+ 20(b) wherein 2e is operable to analyze real-time data, process historical weather patterns, current environmental conditions, and predict irrigation requirements using a machine learning algorithm.
+ 1. an integrated cloud server for storing processed sensor data and facilitating remote access by farmers;
+ 30(ii) wherein 2e is configured to transmit relevant predictions and recommendations directly to the cloud server in real-time, enabling timely decision making on irrigation practices.
+ 1. a user interface (UI), operable for displaying sensor data analysis results, historical trends, and predictive insights;
+ 40(a) wherein 2e is configured to generate visual representations of the collected environmental parameters in an intuitive manner conducive to farmer's understanding. 10
+ 1. a wireless communication module (WCM), operable for transmitting sensor data from multiple locations within agricultural fields;
+ 50(a) wherein WCM supports seamless integration with existing farm infrastructure and enables scalability of the monitoring system across diverse geographical regions.
+ 1. an adaptive learning mechanism, configured to continuously refine predictive models based on incoming data streams for enhanced accuracy over time;
+ 60(a) wherein 2e is adapted to incorporate feedback loops from actual irrigation outcomes and adjust predictions accordingly, thereby improving the system's reliability.
+
+2. TheInternet of Things (IoT) based agricultural monitoring system as 15
+ claimed in claim 1, wherein the central processing unit includes an
+ advanced machine learning algorithm for predictive analytics on
+ crop yield optimization. - response: Claim 2: The IoT based
+ agricultural monitoring system as claimed in Claim 1, comprising a
+ CPU equipped with an innovative adaptive data fusion module that 20
+ dynamically adjusts the weighting of sensor inputs (e.g. soil
+ moisture levels) to optimize water usage efficiency for different
+ crop types and growth stages; wherein this feature enhances
+ precision farming by providing tailored irrigation recommendations,
+ thereby reducing resource wastage while maintaining optimal plant 25
+ health conditions as per the unique requirements of each
+ agricultural scenario. Reference: Claim 1.
+
+3. TheInternet of Things (IoT) based agricultural monitoring system as
+ claimed in claim 1, wherein the central processing unit includes an
+ advanced machine learning algorithm capable of predicting soil 30
+ moisture deficit and excess with high accuracy using historical
+ sensor data.
+
+4. TheInternet of Things (IoT) based agricultural monitoring system as
+ claimed in claim 3, wherein the central processing unit includes an
+ advanced machine learning algorithm capable of predicting soil 35
+ moisture deficiency with a high degree of accuracy using historical
+ sensor data and real-time environmental inputs.
+
+5. TheInternet of Things (IoT) based agricultural monitoring system as
+ claimed in claim 4, wherein the central processing unit utilizes
+ advanced machine learning algorithms to predict crop yield and 40
+ optimize irrigation schedules with unprecedented accuracy.
+
+6. TheInternet of Things (IoT) based agricultural monitoring system as
+ claimed in claim 1, wherein the communication module is designed to
+ operate efficiently over long distances using low-power wide area
+ network technology. 45
+
+7. TheInternet of Things (IoT) based agricultural monitoring system as
+ claimed in claim 1, wherein the central processing unit includes an
+ advanced machine learning algorithm to predict soil moisture
+ deficit and optimize irrigation schedules.
+
+8. TheInternet of Things (IoT) based agricultural monitoring system as 50
+ claimed in claim 5, wherein the learning module includes a novel
+ algorithm for predictive analysis that adapts to changing
+ environmental conditions and crop growth stages.
+
+9. A method foroptimizing irrigation scheduling in precision farming using the IoT based agricultural monitoring system as claimed in claim 1, the method comprising:
+ obtaining real-time data on soil moisture levels from multiple depths within the soil; 55
+ analyzing historical weather patterns and current environmental conditions including temperature, humidity, and ambient air pressure;
+ determining irrigation requirements based on sensor input analysis and predictive algorithms;
+ scheduling optimal irrigation times to maximize water efficiency while ensuring crop health;
+ communicating the recommended irrigation schedule to farm management systems or directly via user interface for manual adjustments, wherein real-time data is continuously updated during operation, and decision making incorporates both sensor input analysis and predictive modeling.
+
+10. The methodas claimed in claim 9, wherein the analysis of 60
+ historical weather patterns and current environmental conditions
+ utilizes a machine learning model that incorporates real-time data
+ from IoT devices to predict soil moisture requirements for
+ different crop types.
+
+11. The methodas claimed in claim 9, wherein a machine learning model 65
+ is utilized to predict future soil moisture levels based on real-
+ time data and historical weather patterns.

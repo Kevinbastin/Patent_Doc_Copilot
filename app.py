@@ -11,7 +11,7 @@ from generate_field_of_invention import generate_field_of_invention
 from generate_background import generate_background_locally
 from generate_detailed_description import generate_detailed_description
 from generate_brief_description import generate_brief_description
-from generate_summary_of_drawings import generate_drawing_descriptions as generate_drawing_summary
+from generate_summary_of_drawings import generate_drawing_descriptions as generate_drawing
 from generate_objects import generate_objects_of_invention
 from cpc_classifier import classify_cpc
 from export_to_pdf import create_patent_pdf
@@ -320,20 +320,47 @@ st.markdown("---")
 
 
 # ----------------------- EXPORT -------------------------
+# ----------------------- EXPORT -------------------------
+st.markdown("---")
 st.markdown("## 📄 Export Patent Document")
+
 export_abstract = st.session_state.get("abstract_input", "")
+
+# ✅ CORRECT ORDER: Indian Patent Office Standard Structure
 pdf_sections = {
-    "Title": st.session_state.get("title", "[Not Generated]"),
-    "Abstract": export_abstract or "[Not Provided]",
-    "Claims": st.session_state.get("claims", "[Not Generated]"),
-    "Field of the Invention": st.session_state.get("field_of_invention", "[Not Generated]"),
-    "Background": st.session_state.get("background", "[Not Generated]"),
-    "Objects of the Invention": st.session_state.get("objects_of_invention", "[Not Generated]"),
-    "Brief Description of Drawings": st.session_state.get("brief_description", "[Not Generated]"),
-    "Summary of Drawings": st.session_state.get("summary_drawings", "[Not Generated]"),
-    "Detailed Description": st.session_state.get("detailed_description", "[Not Generated]"),
+    "Abstract": export_abstract or "[Not Provided]",  # 1. Abstract FIRST
+    "Title": st.session_state.get("title", "[Not Generated]"),  # 2. Title
+    "Field of the Invention": st.session_state.get("field_of_invention", "[Not Generated]"),  # 3. Field
+    "Background of the Invention": st.session_state.get("background", "[Not Generated]"),  # 4. Background
+    "Objects of the Invention": st.session_state.get("objects_of_invention", "[Not Generated]"),  # 5. Objects
+    "Summary of the Invention": st.session_state.get("summary", "[Not Generated]"),  # 6. Summary ✅ ADDED
+    "Brief Description of the Drawings": st.session_state.get("brief_description", "[Not Generated]"),  # 7. Brief Desc
+    "Detailed Description of the Invention": st.session_state.get("detailed_description", "[Not Generated]"),  # 8. Detailed
+    "Claims": st.session_state.get("claims", "[Not Generated]"),  # 9. Claims LAST
 }
+
 st.session_state.generated_sections = pdf_sections
+
+# Show preview with section order
+with st.expander("📋 Preview Export Sections (Indian Patent Office Order)"):
+    section_list = [
+        ("1️⃣", "Abstract"),
+        ("2️⃣", "Title"),
+        ("3️⃣", "Field of the Invention"),
+        ("4️⃣", "Background of the Invention"),
+        ("5️⃣", "Objects of the Invention"),
+        ("6️⃣", "Summary of the Invention"),
+        ("7️⃣", "Brief Description of the Drawings"),
+        ("8️⃣", "Detailed Description of the Invention"),
+        ("9️⃣", "Claims")
+    ]
+    
+    for emoji, section_name in section_list:
+        content = pdf_sections.get(section_name, "[Not Generated]")
+        status = "✅" if content and content != "[Not Generated]" and content != "[Not Provided]" else "❌"
+        word_count = len(content.split()) if content and content not in ["[Not Generated]", "[Not Provided]"] else 0
+        st.write(f"{emoji} {status} **{section_name}**: {word_count} words")
+
 col1, col2 = st.columns(2)
 
 with col1:
@@ -341,22 +368,26 @@ with col1:
     if export_abstract.strip():
         if st.button("📄 Generate PDF"):
             with st.spinner("Creating PDF..."):
-                pdf_path = create_patent_pdf(pdf_sections)
-                st.success("✅ PDF Generated!")
-                with open(pdf_path, "rb") as f:
-                    st.download_button(
-                        label="📥 Download Patent PDF",
-                        data=f,
-                        file_name="patent_document.pdf",
-                        mime="application/pdf"
-                    )
+                try:
+                    pdf_path = create_patent_pdf(pdf_sections)
+                    st.success("✅ PDF Generated!")
+                    with open(pdf_path, "rb") as f:
+                        st.download_button(
+                            label="📥 Download Patent PDF",
+                            data=f,
+                            file_name="patent_document.pdf",
+                            mime="application/pdf"
+                        )
+                except Exception as e:
+                    st.error(f"❌ PDF generation failed: {e}")
+                    st.info("💡 Check that create_patent_pdf() function exists and is working")
     else:
         st.warning("⚠️ Please enter an abstract before generating the PDF.")
 
 with col2:
     st.markdown("### 📝 Export as DOCX")
     if export_abstract.strip():
-        if st.button("📝 Generate USPTO-Compliant DOCX"):
+        if st.button("📝 Generate Indian Patent Office DOCX"):
             try:
                 from docx import Document
                 from docx.shared import Inches, Pt
@@ -365,89 +396,126 @@ with col2:
                 
                 doc = Document()
                 
+                # Set margins (Indian Patent Office standard)
                 sections = doc.sections
                 for section in sections:
-                    section.top_margin = Inches(0.75)
-                    section.bottom_margin = Inches(0.75)
+                    section.top_margin = Inches(1.0)
+                    section.bottom_margin = Inches(1.0)
                     section.left_margin = Inches(1.0)
-                    section.right_margin = Inches(0.75)
+                    section.right_margin = Inches(1.0)
                 
+                # Set default font
                 style = doc.styles['Normal']
                 font = style.font
                 font.name = 'Times New Roman'
                 font.size = Pt(12)
                 paragraph_format = style.paragraph_format
                 paragraph_format.space_after = Pt(12)
-                paragraph_format.line_spacing = 2.0
+                paragraph_format.line_spacing = 1.5
                 
+                # ========== PAGE 1: ABSTRACT (Standalone) ==========
+                abstract_header = doc.add_paragraph()
+                abstract_header_run = abstract_header.add_run("ABSTRACT")
+                abstract_header_run.bold = True
+                abstract_header_run.font.name = 'Times New Roman'
+                abstract_header_run.font.size = Pt(12)
+                
+                abstract_content = export_abstract or "[Not Provided]"
+                abstract_para = doc.add_paragraph(abstract_content.strip())
+                abstract_para.style = doc.styles['Normal']
+                
+                doc.add_page_break()  # New page after abstract
+                
+                # ========== PAGE 2+: TITLE (Centered) ==========
                 title_para = doc.add_paragraph()
                 title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 title_run = title_para.add_run(st.session_state.get("title", "TITLE OF THE INVENTION"))
                 title_run.bold = True
                 title_run.font.name = 'Times New Roman'
-                title_run.font.size = Pt(12)
+                title_run.font.size = Pt(14)
                 
                 doc.add_paragraph()
+                doc.add_paragraph()
                 
-                uspto_sections = [
+                # ========== ALL OTHER SECTIONS IN ORDER ==========
+                patent_sections = [
                     ("FIELD OF THE INVENTION", "field_of_invention"),
                     ("BACKGROUND OF THE INVENTION", "background"),
                     ("OBJECTS OF THE INVENTION", "objects_of_invention"),
-                    ("BRIEF SUMMARY OF THE INVENTION", "summary"),
+                    ("SUMMARY OF THE INVENTION", "summary"),  # ✅ INCLUDED
                     ("BRIEF DESCRIPTION OF THE DRAWINGS", "brief_description"),
-                    ("DETAILED DESCRIPTION OF THE PREFERRED EMBODIMENTS", "detailed_description"),
-                    ("CLAIMS", "claims"),
-                    ("ABSTRACT", "abstract_input")
+                    ("DETAILED DESCRIPTION OF THE INVENTION WITH REFERENCE TO THE ACCOMPANYING FIGURES", "detailed_description"),
                 ]
                 
-                for section_title, session_key in uspto_sections:
+                for section_title, session_key in patent_sections:
+                    # Section header (Bold, uppercase)
                     header = doc.add_paragraph()
                     header_run = header.add_run(section_title)
                     header_run.bold = True
                     header_run.font.name = 'Times New Roman'
                     header_run.font.size = Pt(12)
                     
-                    if session_key == "claims":
-                        content = st.session_state.get(session_key, "[Not Generated]")
-                        if content and content != "[Not Generated]":
-                            claims_para = doc.add_paragraph()
-                            claims_run = claims_para.add_run("What is claimed is:")
-                            claims_run.font.name = 'Times New Roman'
-                            claims_run.font.size = Pt(12)
-                            
-                            content_para = doc.add_paragraph(content.strip())
-                            content_para.style = doc.styles['Normal']
-                        else:
-                            content_para = doc.add_paragraph("[Not Generated]")
-                            content_para.style = doc.styles['Normal']
-                    else:
-                        content = st.session_state.get(session_key, "[Not Generated]")
-                        if session_key == "abstract_input":
-                            content = export_abstract or "[Not Provided]"
-                        
-                        content_para = doc.add_paragraph(content.strip() if content and content.strip() else "[Not Generated]")
-                        content_para.style = doc.styles['Normal']
+                    # Get content
+                    content = st.session_state.get(session_key, "[Not Generated]")
+                    
+                    # Add content
+                    content_para = doc.add_paragraph(content.strip() if content and content.strip() else "[Not Generated]")
+                    content_para.style = doc.styles['Normal']
+                    
+                    doc.add_paragraph()  # Spacing between sections
+                
+                # ========== FINAL SECTION: CLAIMS (with WE CLAIM) ==========
+                doc.add_page_break()  # Claims on new page (optional but professional)
+                
+                claims_header = doc.add_paragraph()
+                claims_header_run = claims_header.add_run("CLAIMS")
+                claims_header_run.bold = True
+                claims_header_run.font.name = 'Times New Roman'
+                claims_header_run.font.size = Pt(12)
+                
+                doc.add_paragraph()
+                
+                claims_content = st.session_state.get("claims", "[Not Generated]")
+                if claims_content and claims_content != "[Not Generated]":
+                    # "WE CLAIM" for Indian Patent Office
+                    we_claim_para = doc.add_paragraph()
+                    we_claim_run = we_claim_para.add_run("WE CLAIM")
+                    we_claim_run.bold = True
+                    we_claim_run.font.name = 'Times New Roman'
+                    we_claim_run.font.size = Pt(12)
                     
                     doc.add_paragraph()
+                    
+                    claims_para = doc.add_paragraph(claims_content.strip())
+                    claims_para.style = doc.styles['Normal']
+                else:
+                    not_gen_para = doc.add_paragraph("[Not Generated]")
+                    not_gen_para.style = doc.styles['Normal']
                 
+                # Save to buffer
                 buffer = BytesIO()
                 doc.save(buffer)
                 buffer.seek(0)
                 
                 st.download_button(
-                    label="📥 Download USPTO-Compliant DOCX",
+                    label="📥 Download Indian Patent Office DOCX",
                     data=buffer,
-                    file_name="patent_application_uspto_format.docx",
+                    file_name="patent_application_indian_format.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                 )
                 
-                st.success("✅ USPTO-Compliant DOCX generated successfully!")
+                st.success("✅ Indian Patent Office DOCX generated successfully!")
+                st.info("📋 Structure: Abstract (Page 1) → Title → 7 Sections → Claims (Final)")
                 
             except Exception as e:
                 st.error(f"❌ DOCX generation failed: {e}")
                 st.info("💡 Make sure python-docx is installed: pip install python-docx")
+                import traceback
+                st.code(traceback.format_exc())
     else:
         st.warning("⚠️ Please enter an abstract before generating the DOCX.")
+
+st.markdown("---")
 
 if st.button("🔄 Reset All"):
     for key in list(st.session_state.keys()):
