@@ -1,91 +1,68 @@
-from llama_cpp import Llama
 import re
 from typing import Dict, List
+from llm_runtime import llm_generate
 
 
-# Path to your local GGUF model
-LLM_PATH = "/workspace/patentdoc-copilot/models/models/phi-3-mini-4k-instruct-q4.gguf"
-
-
-
-# Load the model once with optimized settings
-llm = Llama(
-    model_path=LLM_PATH, device="auto",
-    n_ctx=4096,  # Increased for better context
-    n_threads=4,
-    n_batch=512
-)
-
-
-def extract_technical_components(abstract: str) -> Dict[str, any]:
-    """
-    Extract key technical components and domain from abstract.
-    """
-    components = {
-        'broad_field': '',
-        'specific_field': '',
-        'technologies': [],
-        'application': '',
-        'key_features': []
-    }
-    
-    # Detect broad technical domains
-    broad_domains = {
-        'IoT': ['internet of things', 'iot', 'sensor network', 'wireless sensor'],
-        'AI/ML': ['artificial intelligence', 'machine learning', 'deep learning', 'neural network', 'ai'],
-        'Telecommunications': ['communication system', 'wireless', 'network', 'transmission'],
-        'Agricultural': ['agricultural', 'farming', 'crop', 'irrigation', 'soil'],
-        'Medical': ['medical', 'healthcare', 'diagnosis', 'patient', 'clinical'],
-        'Wildlife': ['wildlife', 'animal', 'conservation', 'conflict mitigation'],
-        'Industrial': ['industrial', 'manufacturing', 'monitoring', 'automation']
+# ============================================================
+# DOMAIN & FEATURE EXTRACTION
+# ============================================================
+def extract_technical_domain(abstract: str) -> str:
+    """Extract the primary technical domain from the abstract."""
+    common_domains = {
+        "artificial intelligence": ["ai", "machine learning", "neural network", "deep learning", "ml", "generative model"],
+        "information retrieval": ["search", "query", "retrieval", "summarization", "information processing", "search results"],
+        "natural language processing": ["natural language", "nlp", "text processing", "language model"],
+        "computer science": ["computer", "software", "algorithm", "computation"],
+        "telecommunications": ["wireless", "network", "communication", "5g", "antenna"],
+        "renewable energy": [
+            "wind power", "wind energy", "renewable energy", "turbine",
+            "power generation", "generator", "energy conversion"
+        ],
+        "power engineering": [
+            "power system", "power management", "electrical power",
+            "energy storage", "inverter", "battery"
+        ],
+        "electrical engineering": ["circuit", "electrical", "electronic", "power"],
+        "mechanical engineering": ["mechanical", "engine", "mechanism", "manufacturing"],
+        "biotechnology": ["biotech", "genetic", "protein", "dna", "biological"],
+        "pharmaceutical": ["drug", "pharmaceutical", "medicine", "therapeutic"],
+        "medical devices": ["medical device", "diagnostic", "imaging", "surgical"],
+        "semiconductor": ["semiconductor", "chip", "integrated circuit", "transistor"],
+        "chemical engineering": ["chemical", "catalyst", "reaction", "synthesis"],
+        "materials science": ["material", "composite", "polymer", "alloy"],
+        "automotive": ["automotive", "vehicle", "automobile", "engine"],
+        "aerospace": ["aerospace", "aircraft", "aviation", "flight"]
     }
     
     abstract_lower = abstract.lower()
     
-    for domain, keywords in broad_domains.items():
+    # Check for domain matches (prioritize more specific domains first)
+    for domain, keywords in common_domains.items():
         if any(kw in abstract_lower for kw in keywords):
-            components['broad_field'] = domain
-            break
+            return domain
     
-    # Extract specific technologies
-    tech_patterns = [
-        r'(LoRaWAN|LoRa|GSM|WiFi|Bluetooth|Zigbee|NFC)',
-        r'(TinyML|YOLO|CNN|LSTM|transformer)',
-        r'(sensor|detector|camera|microcontroller|processor)',
-        r'(cloud server|edge computing|fog computing)',
-    ]
-    
-    for pattern in tech_patterns:
-        matches = re.findall(pattern, abstract, re.IGNORECASE)
-        components['technologies'].extend(matches)
-    
-    # Extract application area
-    app_patterns = [
-        r'for\s+([^,\.]{10,50}?)(?:,|\.|comprising)',
-        r'system\s+for\s+([^,\.]{10,50}?)(?:,|\.|comprising)',
-    ]
-    
-    for pattern in app_patterns:
-        match = re.search(pattern, abstract, re.IGNORECASE)
-        if match:
-            components['application'] = match.group(1).strip()
-            break
-    
-    return components
+    return "technology"
 
 
+# ============================================================
+# CLEANING & VALIDATION
+# ============================================================
 def clean_field_text(text: str) -> str:
     """Clean and format the generated field of invention text."""
     # Remove common prefixes
-    text = re.sub(r'^(Field of the Invention:|Field of Invention:|FIELD OF THE INVENTION:)\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(
+        r'(The present invention\s*){2,}',
+        'The present invention ',
+        text,
+        flags=re.IGNORECASE
+    )
+
     
-    # Remove extra whitespace and normalize
+    # Remove extra whitespace and newlines
     text = ' '.join(text.split())
-    
-    # Ensure proper sentence structure
     text = text.strip()
     
-    # Capitalize first letter if needed
+    # Capitalize first letter
     if text and not text[0].isupper():
         text = text[0].upper() + text[1:]
     
@@ -97,59 +74,44 @@ def clean_field_text(text: str) -> str:
 
 
 def validate_field_text(text: str) -> Dict[str, any]:
-    """
-    Validate the field of invention text against Indian Patent Office standards.
-    Based on real patent: should be 2-4 sentences, 40-120 words, hierarchical structure.
-    """
+    """Validate the field of invention text against patent standards."""
     issues = []
     warnings = []
     word_count = len(text.split())
     sentence_count = len(re.findall(r'[.!?]+', text))
     
-    # Check length (based on real patent example: 77 words, 3 sentences)
-    if word_count < 30:
-        issues.append("Too brief. Field should be 40-120 words based on patent standards.")
-    elif word_count > 150:
-        issues.append("Too lengthy. Keep it concise (40-120 words).")
+    # Check length (typically 2-3 sentences, 30-100 words)
+    # Check length (2–3 sentences, 40–80 words preferred)
+    if word_count < 40:
+        issues.append("Too brief. Should be 40–80 words.")
+    elif word_count > 100:
+        issues.append("Too lengthy. Should be 40–80 words.")
     
-    # Check sentence count (real patent has 3 sentences: general -> particular -> more particular)
-    if sentence_count < 2:
-        issues.append("Need at least 2 sentences (general field + specific focus).")
-    elif sentence_count > 5:
-        warnings.append("Consider consolidating into 2-4 sentences for clarity.")
+    # Check for proper sentence structure
+    if sentence_count < 1:
+        issues.append("At least one complete sentence is required.")
+    elif sentence_count > 4:
+        warnings.append("Consider consolidating into 2–3 sentences.")
     
-    # Check for required phrases (from real patent)
+    # Check for required phrases
     standard_phrases = [
-        "present invention",
-        "relates to",
-        "pertains to", 
-        "particularly to",
-        "more particularly",
-        "specifically to"
+        "relates to", "pertains to", "concerns", "directed to",
+        "field of", "area of", "relates generally to"
     ]
+    has_standard_phrase = any(phrase in text.lower() for phrase in standard_phrases)
     
-    has_present_invention = "present invention" in text.lower()
-    has_relates = any(phrase in text.lower() for phrase in ["relates to", "pertains to"])
-    has_hierarchy = any(phrase in text.lower() for phrase in ["particularly", "more particularly", "specifically"])
+    if not has_standard_phrase:
+        issues.append("Should use standard patent language (e.g., 'relates to', 'pertains to').")
     
-    if not has_present_invention:
-        issues.append("Must include 'The present invention' or 'present invention'.")
-    
-    if not has_relates:
-        issues.append("Must use 'relates to' or 'pertains to' (standard patent language).")
-    
-    if not has_hierarchy:
-        warnings.append("Consider hierarchical structure: 'generally relates to... particularly to... more particularly...'")
+    # Check for "present invention" or similar
+    if "present invention" not in text.lower() and "this invention" not in text.lower() and "present disclosure" not in text.lower():
+        warnings.append("Consider starting with 'The present invention' or 'This invention'.")
     
     # Check for marketing language (should be avoided)
     marketing_words = ["revolutionary", "groundbreaking", "innovative", "novel", "unique", "best", "advanced"]
     found_marketing = [word for word in marketing_words if re.search(r'\b' + word + r'\b', text, re.IGNORECASE)]
     if found_marketing:
         issues.append(f"Avoid marketing language: {', '.join(found_marketing)}")
-    
-    # Check for technical specificity
-    if not any(char.isdigit() or word in text.lower() for word in ['system', 'method', 'apparatus', 'device', 'module']):
-        warnings.append("Include technical category (system, method, apparatus, etc.)")
     
     return {
         "valid": len(issues) == 0,
@@ -160,14 +122,12 @@ def validate_field_text(text: str) -> Dict[str, any]:
     }
 
 
+# ============================================================
+# FIELD OF INVENTION GENERATION
+# ============================================================
 def generate_field_of_invention(abstract: str, max_attempts: int = 3) -> Dict[str, any]:
     """
-    Generates the 'Field of the Invention' section matching Indian Patent Office format.
-    
-    Format (from real patent IN202541069047):
-    Sentence 1: "The present invention generally relates to [broad field]..."
-    Sentence 2: "...particularly to [more specific area]"
-    Sentence 3: "More particularly, the present invention relates to [very specific implementation]"
+    Generates the 'Field of the Invention' section from an abstract.
     
     Args:
         abstract: The patent abstract text
@@ -177,44 +137,49 @@ def generate_field_of_invention(abstract: str, max_attempts: int = 3) -> Dict[st
         Dictionary containing the generated field text and metadata
     """
     
-    components = extract_technical_components(abstract)
+    technical_domain = extract_technical_domain(abstract)
     
-    # Build enhanced prompt based on real patent structure
-    prompt = f"""You are a patent attorney drafting the "Field of the Invention" section for an Indian patent application.
+    # Enhanced prompt with patent-specific instructions and examples
+    prompt = f"""You are an expert patent attorney drafting an Indian patent application.
 
-INVENTION ABSTRACT:
-{abstract}
+TASK: Write ONLY the "Field of the Invention" section based on the abstract below.
 
-REAL PATENT EXAMPLE (Study this structure):
-"The present invention generally relates to the field of wildlife conservation and conflict mitigation, particularly to Internet of Things (IoT) based remote monitoring and alerting system. More particularly, the present invention relates to an Internet of Things (IoT) based remote monitoring and multi-modal alerting system using an integrated dual-communication system for human-animal conflict mitigation."
+IMPORTANT:
+- Output MUST contain ONLY English ASCII characters.
+- Do NOT generate Chinese, Japanese, Korean, or any non-English language.
+- If unsure, STOP the sentence instead of switching language.
 
 REQUIREMENTS:
-1. Write EXACTLY 2-3 sentences following this hierarchical structure:
-   - Sentence 1: "The present invention generally relates to [broad field]..."
-   - Sentence 2: "...particularly to [specific technology/system]"
-   - Sentence 3: "More particularly, the present invention relates to [complete specific implementation]"
+1. Use formal, technical language (third person, present tense)
+2. Start with standard phrases:
+   - "The present invention relates generally to..."
+   - "This invention pertains to..."
+   - "The present disclosure relates to..."
+3. Be concise: 2-3 sentences, 40-80 words total
+4. State the technical field broadly, then narrow to specific area
+5. Include the specific application or technology mentioned
+6. Do NOT include technical details, advantages, or how it works
+7. Do NOT use marketing language (novel, innovative, revolutionary, etc.)
+8. Do NOT repeat the abstract verbatim
 
-2. Use formal patent language:
-   - Start with "The present invention"
-   - Use "generally relates to", "particularly to", "more particularly"
-   - Third person, present tense only
-   - Technical but clear language
+GOOD EXAMPLES:
 
-3. Target: 40-100 words total
+Example 1:
+"The present invention relates generally to wireless communication systems, and more particularly to methods and apparatus for improving signal transmission in 5G networks."
 
-4. DO NOT include:
-   - Marketing terms (novel, innovative, revolutionary, etc.)
-   - Technical details from claims
-   - Advantages or benefits
-   - How it works
+Example 2:
+"This invention pertains to the field of medical imaging, specifically to enhanced MRI scanning techniques for early disease detection."
 
-5. DO include:
-   - Broad technical field
-   - Specific domain/application
-   - Key technologies (IoT, AI, ML, sensors, etc.)
-   - Precise system/method description
+Example 3:
+"The present disclosure relates to artificial intelligence systems, and more specifically to machine learning models for natural language processing and text generation."
 
-NOW WRITE THE FIELD OF THE INVENTION (only the text, no heading):
+Example 4:
+"The present invention relates generally to information retrieval systems, particularly to methods and systems for generating natural language summaries of search results using generative language models with factual verification."
+
+INVENTION ABSTRACT:
+{abstract.strip()}
+
+Now write ONLY the Field of the Invention text (no heading, no extra explanation, just the 2-3 sentences):
 
 The present invention"""
 
@@ -223,20 +188,41 @@ The present invention"""
     
     for attempt in range(max_attempts):
         try:
-            response = llm(
-                prompt=prompt,
-                max_tokens=300,
-                temperature=0.25 if attempt == 0 else 0.35 + (attempt * 0.1),
-                stop=["\n\nBACKGROUND", "BACKGROUND OF", "\n\n\n", "Summary:", "Claims:"],
+            print(f"   Attempt {attempt + 1}/{max_attempts}...", end=" ", flush=True)
+            
+            # CORRECTED: Removed max_input_tokens parameter
+            raw_text = llm_generate(
+                prompt,
+                max_new_tokens=220,
+                temperature=0.25 if attempt == 0 else 0.30 + (attempt * 0.08),
                 top_p=0.88,
-                repeat_penalty=1.18
+                repeat_penalty=1.18,
+                stop_strings=[
+                    "\n\n",
+                    "\nBackground",
+                    "\nBACKGROUND",
+                    "Summary",
+                    "SUMMARY",
+                    "请",
+                    "提供",
+                    "剩余",
+                    "部分",
+                    "永续",
+                    "递延"
+                ]
+
             )
             
-            raw_text = "The present invention" + response["choices"][0]["text"].strip()
-            cleaned_text = clean_field_text(raw_text)
+            if not raw_text or len(raw_text.strip()) < 20:
+                print("Empty response")
+                continue
+            
+            # Prepend "The present invention" since we prompted with it
+            full_text = raw_text.strip()
+            cleaned_text = clean_field_text(full_text)
             validation = validate_field_text(cleaned_text)
             
-            # Calculate quality score (lower is better)
+            # Calculate quality score
             score = len(validation["issues"]) * 10 + len(validation["warnings"]) * 2
             
             result = {
@@ -247,179 +233,156 @@ The present invention"""
                 "word_count": validation["word_count"],
                 "sentence_count": validation["sentence_count"],
                 "attempt": attempt + 1,
-                "components": components,
+                "technical_domain": technical_domain,
                 "score": score
             }
             
+            print(f"Score: {score}, Words: {validation['word_count']}")
+            
+            # Return immediately if perfect
             if validation["valid"] and len(validation["warnings"]) == 0:
+                print("   ✅ Perfect!")
                 return result
             
-            # Track best attempt
+            # Keep track of best attempt
             if score < best_score:
                 best_score = score
                 best_result = result
-                
+        
         except Exception as e:
+            print(f"ERROR: {e}")
+            import traceback
+            traceback.print_exc()
             continue
     
-    return best_result if best_result else {
-        "text": f"The present invention generally relates to {components.get('broad_field', 'technology')}, particularly to {components.get('application', 'systems and methods')}.",
+    # Return best result if decent
+    if best_result and best_result["score"] < 30:
+        return best_result
+    
+    # Improved fallback with more specific text
+    if "search" in abstract.lower() and "summar" in abstract.lower():
+        fallback_text = "The present invention relates generally to information retrieval and natural language processing, particularly to systems and methods for generating natural language summaries of search results using generative models."
+    elif "machine learning" in abstract.lower() or "ai" in abstract.lower():
+        fallback_text = f"The present invention relates generally to {technical_domain}, and more particularly to systems and methods for data processing and analysis using machine learning techniques."
+    else:
+        fallback_text = f"The present invention relates generally to the field of {technical_domain}, and more particularly to systems and methods for implementing related technical solutions."
+    
+    return {
+        "text": fallback_text,
         "valid": False,
-        "issues": ["Generation failed, using fallback"],
-        "warnings": [],
-        "word_count": 0,
-        "sentence_count": 0,
+        "issues": ["Generation failed after all attempts - using fallback"],
+        "warnings": ["Manually review and edit to match your specific invention"],
+        "word_count": len(fallback_text.split()),
+        "sentence_count": len(re.findall(r'[.!?]+', fallback_text)),
         "attempt": max_attempts,
-        "components": components,
-        "score": 999
+        "technical_domain": technical_domain,
+        "score": 100
     }
 
 
-def format_for_patent_document(field_text: str, include_heading: bool = True) -> str:
-    """
-    Format the field text with Indian Patent Office standard heading and formatting.
-    """
-    output = ""
-    
-    if include_heading:
-        output += "FIELD OF THE INVENTION\n\n"
-    
-    # Add the field text with proper line spacing
-    output += field_text
-    
-    return output
-
-
-def generate_alternative_versions(abstract: str) -> List[Dict]:
-    """
-    Generate multiple variations with different emphasis.
-    """
+# ============================================================
+# ALTERNATIVE VERSIONS
+# ============================================================
+def generate_variations(abstract: str) -> List[Dict[str, str]]:
+    """Generate multiple variations of the field of invention."""
     variations = []
     
-    # Variation 1: Technology-focused
-    prompt1 = f"""Write a Field of Invention emphasizing the technology stack.
+    prompts = [
+        {
+            "label": "Broad-to-narrow focus",
+            "prompt": f"""Write Field of Invention that starts broad then narrows down.
 
-Abstract: {abstract}
+Abstract: {abstract[:600]}
 
-Structure:
-The present invention generally relates to [technology field], particularly to [specific technologies]. More particularly, the present invention relates to [implementation].
+Format: Start with "The present invention relates generally to [broad field], and more particularly to [specific application and technology]."
 
-Write only the field text:
+Write only the field text (2-3 sentences, 40-80 words):
+
 The present invention"""
+        },
+        {
+            "label": "Application-focused",
+            "prompt": f"""Write Field of Invention focusing on the specific application and purpose.
 
-    # Variation 2: Application-focused
-    prompt2 = f"""Write a Field of Invention emphasizing the application domain.
+Abstract: {abstract[:600]}
 
-Abstract: {abstract}
+Format: Start with "This invention pertains to [application domain], specifically to [technical implementation and purpose]."
 
-Structure:
-The present invention generally relates to [application domain], particularly to [specific application]. More particularly, the present invention relates to [detailed system].
+Write only the field text (2-3 sentences, 40-80 words):
 
-Write only the field text:
-The present invention"""
+This invention"""
+        },
+        {
+            "label": "Technology-focused",
+            "prompt": f"""Write Field of Invention emphasizing the underlying technology and methods.
 
-    # Variation 3: Problem-solution focused
-    prompt3 = f"""Write a Field of Invention emphasizing the domain and solution.
+Abstract: {abstract[:600]}
 
-Abstract: {abstract}
+Format: Start with "The present disclosure relates to [technology area], particularly to [specific methods/systems and their application]."
 
-Structure:
-The present invention generally relates to the field of [problem domain], particularly to [solution approach]. More particularly, the present invention relates to [specific implementation].
+Write only the field text (2-3 sentences, 40-80 words):
 
-Write only the field text:
-The present invention"""
-
-    prompts = [prompt1, prompt2, prompt3]
-    labels = ["Technology-focused", "Application-focused", "Problem-solution focused"]
+The present disclosure"""
+        }
+    ]
     
-    for i, prompt in enumerate(prompts):
+    for config in prompts:
         try:
-            response = llm(
-                prompt=prompt,
-                max_tokens=280,
-                temperature=0.3 + (i * 0.1),
-                stop=["\n\nBACKGROUND", "\n\n\n"],
+            # CORRECTED: Removed max_input_tokens
+            raw_text = llm_generate(
+                config["prompt"],
+                max_new_tokens=180,
+                temperature=0.32,
                 top_p=0.9,
-                repeat_penalty=1.2
+                repeat_penalty=1.18,
+                stop_strings=["\n\nBackground", "\n\n\n", "\n\n"]
             )
             
-            raw_text = "The present invention" + response["choices"][0]["text"].strip()
-            cleaned = clean_field_text(raw_text)
+            if not raw_text or len(raw_text.strip()) < 20:
+                continue
+            
+            # Prepend the starter phrase based on which prompt
+            if "present invention" in config["prompt"]:
+                full_text = "The present invention" + raw_text.strip()
+            elif "This invention" in config["prompt"]:
+                full_text = "This invention" + raw_text.strip()
+            else:
+                full_text = "The present disclosure" + raw_text.strip()
+            
+            cleaned = clean_field_text(full_text)
             validation = validate_field_text(cleaned)
             
             variations.append({
-                "label": labels[i],
+                "label": config["label"],
                 "text": cleaned,
                 "valid": validation["valid"],
                 "word_count": validation["word_count"],
-                "sentence_count": validation["sentence_count"]
+                "sentence_count": validation["sentence_count"],
+                "issues": validation.get("issues", []),
+                "warnings": validation.get("warnings", [])
             })
-        except:
+            
+        except Exception as e:
+            print(f"   Error generating {config['label']}: {e}")
             continue
     
     return variations
 
 
-def print_formatted_report(result: Dict):
-    """Print a professional validation report."""
-    print("\n" + "=" * 80)
-    print("              FIELD OF THE INVENTION - VALIDATION REPORT")
-    print("=" * 80)
-    
-    # Status
-    if result["valid"] and len(result["warnings"]) == 0:
-        print("\n✅ STATUS: EXCELLENT - Meets Indian Patent Office standards")
-    elif result["valid"]:
-        print("\n✅ STATUS: VALID - Minor improvements recommended")
-    else:
-        print("\n❌ STATUS: NEEDS REVISION - Critical issues found")
-    
-    # Metrics
-    print("\n" + "-" * 80)
-    print("📊 METRICS:")
-    print(f"   Word Count:        {result['word_count']} words (optimal: 40-120)")
-    print(f"   Sentence Count:    {result['sentence_count']} sentences (optimal: 2-4)")
-    print(f"   Generation Attempt: {result['attempt']}")
-    print(f"   Quality Score:     {result['score']} (lower is better)")
-    
-    # Technical components detected
-    if result.get('components'):
-        comp = result['components']
-        print("\n" + "-" * 80)
-        print("🔍 DETECTED COMPONENTS:")
-        if comp.get('broad_field'):
-            print(f"   Broad Field:    {comp['broad_field']}")
-        if comp.get('application'):
-            print(f"   Application:    {comp['application']}")
-        if comp.get('technologies'):
-            print(f"   Technologies:   {', '.join(comp['technologies'][:5])}")
-    
-    # Issues
-    if result["issues"]:
-        print("\n" + "-" * 80)
-        print("🚨 CRITICAL ISSUES:")
-        for i, issue in enumerate(result["issues"], 1):
-            print(f"   {i}. {issue}")
-    
-    # Warnings
-    if result["warnings"]:
-        print("\n" + "-" * 80)
-        print("⚠️  WARNINGS:")
-        for i, warning in enumerate(result["warnings"], 1):
-            print(f"   {i}. {warning}")
-    
-    # The field text
-    print("\n" + "=" * 80)
-    print("📝 GENERATED FIELD OF THE INVENTION:")
-    print("-" * 80)
-    print(result["text"])
-    print("-" * 80)
+# ============================================================
+# FORMATTING
+# ============================================================
+def format_for_patent(field_text: str, paragraph_number: str = "[0001]") -> str:
+    """Format the field text with standard patent paragraph numbering."""
+    return f"{paragraph_number} {field_text}"
 
 
-# CLI for testing locally
+# ============================================================
+# CLI
+# ============================================================
 if __name__ == "__main__":
     print("=" * 80)
-    print("       INDIAN PATENT OFFICE COMPLIANT FIELD OF INVENTION GENERATOR")
+    print("         PATENT FIELD OF INVENTION GENERATOR")
     print("=" * 80)
     print("\n📥 Enter the invention abstract (press Enter twice to finish):")
     print("-" * 80)
@@ -438,33 +401,71 @@ if __name__ == "__main__":
         print("\n❌ No abstract provided. Exiting.")
         exit(1)
     
-    print("\n⏳ Generating 'Field of the Invention' (analyzing abstract and generating up to 3 versions)...")
+    print("\n🛠️  Generating 'Field of the Invention'...")
     
     result = generate_field_of_invention(abstract, max_attempts=3)
     
-    # Print detailed report
-    print_formatted_report(result)
-    
-    # Show formatted version
     print("\n" + "=" * 80)
-    print("📄 FORMATTED FOR PATENT DOCUMENT:")
+    print("📘 FIELD OF THE INVENTION - VALIDATION REPORT")
     print("=" * 80)
-    print(format_for_patent_document(result["text"]))
+    
+    # Display validation status
+    if result["valid"] and len(result.get("warnings", [])) == 0:
+        print("\n✅ Status: EXCELLENT - Ready for patent application")
+    elif result["valid"]:
+        print("\n✅ Status: VALID - Minor improvements recommended")
+    else:
+        print("\n⚠️  Status: NEEDS REVIEW - Issues found")
+    
+    print("\n" + "-" * 80)
+    print("📊 STATISTICS:")
+    print(f"   • Word Count:        {result['word_count']} (optimal: 40-80)")
+    print(f"   • Sentences:         {result['sentence_count']} (optimal: 2-3)")
+    print(f"   • Technical Domain:  {result['technical_domain']}")
+    print(f"   • Attempts Used:     {result['attempt']}/{3}")
+    print(f"   • Quality Score:     {result['score']} (lower is better)")
+    
+    if result["issues"]:
+        print("\n" + "-" * 80)
+        print("🚨 CRITICAL ISSUES:")
+        for i, issue in enumerate(result["issues"], 1):
+            print(f"   {i}. {issue}")
+    
+    if result.get("warnings"):
+        print("\n" + "-" * 80)
+        print("⚠️  WARNINGS:")
+        for i, warning in enumerate(result["warnings"], 1):
+            print(f"   {i}. {warning}")
+    
+    print("\n" + "=" * 80)
+    print("📝 GENERATED TEXT:")
+    print("-" * 80)
+    print(result["text"])
+    print("-" * 80)
+    
+    print("\n" + "=" * 80)
+    print("📄 FORMATTED FOR PATENT (with paragraph numbering):")
+    print("-" * 80)
+    print(format_for_patent(result["text"]))
+    print("-" * 80)
     
     # Optional: Generate variations
-    print("\n🔄 Generate alternative versions with different emphasis? (y/n): ", end="")
+    print("\n🔄 Generate alternative versions? (y/n): ", end="")
     if input().lower() == 'y':
         print("\n⏳ Generating variations...")
-        variations = generate_alternative_versions(abstract)
+        variations = generate_variations(abstract)
         
         if variations:
             print("\n" + "=" * 80)
             print("📝 ALTERNATIVE VERSIONS:")
             print("=" * 80)
             
-            for i, var in enumerate(variations, 1):
+            for var in variations:
                 print(f"\n--- {var['label']} ---")
-                print(f"Valid: {'✅' if var['valid'] else '❌'} | Words: {var['word_count']} | Sentences: {var['sentence_count']}")
+                status = "✅" if var['valid'] else "⚠️"
+                print(f"{status} | Words: {var['word_count']} | Sentences: {var['sentence_count']}")
+                if var.get('issues'):
+                    print(f"Issues: {'; '.join(var['issues'][:2])}")
                 print("-" * 80)
                 print(var['text'])
                 print("-" * 80)
@@ -474,10 +475,12 @@ if __name__ == "__main__":
     print("\n" + "=" * 80)
     print("💡 TIPS FOR PERFECT FIELD OF INVENTION:")
     print("=" * 80)
-    print("1. Follow the three-tier structure: general → particular → more particular")
-    print("2. Always start with 'The present invention'")
-    print("3. Use 'generally relates to', 'particularly to', 'more particularly'")
-    print("4. Keep it 40-100 words, 2-4 sentences")
-    print("5. State WHAT it is, not HOW it works or WHY it's better")
-    print("6. Avoid marketing language - stay technical and formal")
+    print("1. Start with 'The present invention' or 'This invention'")
+    print("2. Use 'relates to', 'pertains to', or 'directed to'")
+    print("3. Begin broad, then narrow to specific technical area")
+    print("4. Keep it 40-80 words, 2-3 sentences")
+    print("5. Avoid marketing language - stay technical and formal")
+    print("6. State WHAT it is, not HOW it works or WHY it's better")
+    print("=" * 80)
+    print("\n✅ Generation complete!")
     print("=" * 80)
