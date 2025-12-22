@@ -1,28 +1,13 @@
-from llama_cpp import Llama
 import re
-from typing import Dict, List
+from typing import Dict
+from llm_runtime import llm_generate
 
 
-# Path to your locally downloaded Phi-3 model (.gguf file)
-LLM_PATH = "/workspace/patentdoc-copilot/models/models/phi-3-mini-4k-instruct-q4.gguf"
-
-
-
-# Load the model ONCE at module level
-llm = Llama(
-    model_path=LLM_PATH, device="auto",
-    n_ctx=4096,
-    n_threads=4,
-    n_batch=512,
-    verbose=False
-)
-
-
+# ============================================================
+# FIGURE INFORMATION EXTRACTION
+# ============================================================
 def extract_figure_info_from_abstract(abstract: str) -> Dict[str, any]:
-    """
-    Extract information from abstract to suggest figures.
-    Real patents typically have 5-10 figures.
-    """
+    """Extract information from abstract to suggest figures."""
     info = {
         'system_components': [],
         'subsystems': [],
@@ -30,128 +15,133 @@ def extract_figure_info_from_abstract(abstract: str) -> Dict[str, any]:
         'has_data': False,
         'suggested_count': 5
     }
-    
+
     abstract_lower = abstract.lower()
-    
-    # Check for method/process
-    info['has_method'] = any(word in abstract_lower for word in ['method', 'process', 'steps', 'algorithm'])
-    
-    # Check for data/results
-    info['has_data'] = any(word in abstract_lower for word in ['comparative', 'results', 'latency', 'accuracy', 'performance'])
-    
-    # Extract main system components
+
     component_patterns = [
         r'comprising[:\s]+([^\.]{20,150})',
         r'includes?\s+([^\.]{20,100})',
         r'consists of\s+([^\.]{20,100})'
     ]
-    
+
     for pattern in component_patterns:
         matches = re.findall(pattern, abstract, re.IGNORECASE)
         if matches:
-            # Split by commas and semicolons
-            parts = re.split(r'[,;]\s*', matches[0])
-            info['system_components'].extend([p.strip() for p in parts[:5]])
-    
-    # Estimate figure count
-    base_count = 3  # Minimum: overview + main system + one detail
+            parts = re.findall(
+                r'\b(unit|module|assembly|system|device|controller|housing|shaft|rotor|stator)\b',
+                matches[0],
+                re.IGNORECASE
+            )
+            info['system_components'].extend(parts[:5])
+
+
+    base_count = 3
+
     if info['system_components']:
         base_count += min(len(info['system_components']), 3)
-    if info['has_method']:
-        base_count += 1
-    if info['has_data']:
-        base_count += 2
-    
-    info['suggested_count'] = min(base_count, 10)
-    
+
+
+    # Final safe cap for Indian patents
+    info['suggested_count'] = min(max(base_count, 3), 5)
+
     return info
 
 
+# ============================================================
+# CLEANING & VALIDATION
+# ============================================================
 def clean_brief_description(text: str) -> str:
-    """Clean and format the brief description text."""
-    # Remove header if added
-    text = re.sub(r'^(BRIEF DESCRIPTION OF THE DRAWINGS:?)\s*', '', text, flags=re.IGNORECASE | re.MULTILINE)
-    
-    # Remove markdown/formatting
-    text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)
-    text = re.sub(r'__([^_]+)__', r'\1', text)
-    text = re.sub(r'\*([^*]+)\*', r'\1', text)
-    
-    # Standardize figure format
+    # Remove heading
+    text = re.sub(
+        r'^(BRIEF DESCRIPTION OF THE DRAWINGS:?)\s*',
+        '',
+        text,
+        flags=re.IGNORECASE
+    )
+
+    # Force each Figure onto a new line
+    text = re.sub(r'\s+(Figure\s+\d+:)', r'\n\1', text)
+
+    # Clean formatting
     lines = []
     for line in text.split('\n'):
         line = line.strip()
         if not line:
             continue
-        
-        # Ensure "Figure X:" format (capital F, colon)
-        line = re.sub(r'^[Ff]igure\s*(\d+[A-Z]?)[\s:]*', r'Figure \1: ', line)
-        line = re.sub(r'^FIG\.?\s*(\d+[A-Z]?)[\s:]*', r'Figure \1: ', line)
-        
-        # Ensure ends with period
-        if line and not line.endswith('.'):
+
+        line = re.sub(
+            r'^Figure\s*(\d+)\s*:?',
+            r'Figure \1:',
+            line,
+            flags=re.IGNORECASE
+        )
+
+        if not line.endswith('.'):
             line += '.'
-        
+
         lines.append(line)
-    
-    return '\n'.join(lines)
+
+    return "\n".join(lines)
+
+
 
 
 def validate_brief_description(text: str, expected_count: int = None) -> Dict[str, any]:
-    """
-    Validate brief description against Indian Patent Office standards.
-    Real patent format: "Figure X: illustrates [description]."
-    """
+    """Validate brief description against Indian Patent Office standards."""
     issues = []
     warnings = []
-    
-    text_lower = text.lower()
-    
-    # Extract figure numbers
+
     figure_matches = re.findall(r'Figure\s+(\d+[A-Z]?)', text)
-    figure_numbers = [int(re.match(r'(\d+)', f).group(1)) for f in figure_matches]
-    
+    figure_numbers = [int(re.match(r'(\d+)', f).group(1)) for f in figure_matches] if figure_matches else []
+
     if not figure_numbers:
         issues.append("No figures found. Must have at least 3-5 figures.")
-        return {
-            "valid": False,
-            "issues": issues,
-            "warnings": warnings,
-            "figure_count": 0
-        }
-    
-    # Check sequential numbering
+        return {"valid": False, "issues": issues, "warnings": warnings, "figure_count": 0}
+
     expected_sequence = list(range(1, max(figure_numbers) + 1))
     if sorted(set(figure_numbers)) != expected_sequence:
-        issues.append(f"Figures must be numbered sequentially")
-    
-    # Check minimum figures
+        issues.append("Figures must be numbered sequentially")
+
     if len(set(figure_numbers)) < 3:
         issues.append("Need at least 3 figures (minimum for patents).")
-    
-    # Validate each line
+
     lines = [l.strip() for l in text.split('\n') if l.strip()]
-    
+
     for i, line in enumerate(lines):
         fig_num = i + 1
-        
-        # Must start with "Figure X:"
+        functional_verbs = [
+            "adjust", "control", "monitor", "regulate",
+            "process", "convert", "generate", "manage",
+            "detect", "transmit", "stabilize", "compute"
+        ]
+
+        if any(v in line.lower() for v in functional_verbs):
+            issues.append(
+                f"Figure {fig_num}: Functional or operational language is not permitted in drawings"
+            )
+
+
         if not re.match(r'^Figure\s+\d+[A-Z]?:\s+', line):
             issues.append(f"Line {i+1}: Must start with 'Figure X: '")
-        
-        # Must contain "illustrates" (Indian Patent Office standard)
-        if 'illustrates' not in line.lower():
-            warnings.append(f"Figure {fig_num}: Should use 'illustrates'")
-        
-        # Should end with period
+
+        if "illustrates" not in line.lower():
+           issues.append(f"Figure {fig_num}: Must use the word 'illustrates'")
+
+
         if not line.endswith('.'):
             issues.append(f"Figure {fig_num}: Must end with period")
-        
-        # Check for "according to the present invention" for system figures
+
         if any(word in line.lower() for word in ['system', 'block diagram', 'setup', 'apparatus', 'device']):
             if 'according to the present invention' not in line.lower():
-                warnings.append(f"Figure {fig_num}: System figures should end with 'according to the present invention'")
-    
+                warnings.append(
+                    f"Figure {fig_num}: Consider ending system figures with "
+                    f"'according to the present invention' for formality"
+                )
+
+
+    if expected_count and len(set(figure_numbers)) != expected_count:
+        warnings.append(f"Generated {len(set(figure_numbers))} figures, expected {expected_count}")
+
     return {
         "valid": len(issues) == 0,
         "issues": issues,
@@ -160,68 +150,90 @@ def validate_brief_description(text: str, expected_count: int = None) -> Dict[st
     }
 
 
-def generate_brief_description(abstract: str, num_figures: int = None, 
-                               figure_descriptions: str = "", max_attempts: int = 3) -> Dict[str, any]:
-    """
-    Generate 'Brief Description of the Drawings' section matching Indian Patent Office format.
-    """
-    
-    # Extract information from abstract
+# ============================================================
+# BRIEF DESCRIPTION GENERATION
+# ============================================================
+def generate_brief_description(
+    abstract: str,
+    num_figures: int = None,
+    figure_descriptions: str = "",
+    max_attempts: int = 3
+) -> Dict[str, any]:
+    """Generate 'Brief Description of the Drawings' section matching Indian Patent Office format."""
     fig_info = extract_figure_info_from_abstract(abstract)
-    
+
     if num_figures is None:
         num_figures = fig_info['suggested_count']
-    
-    # Build prompt based on real patent format
-    prompt = f"""You are a patent attorney drafting "Brief Description of the Drawings" for an Indian patent.
+
+    prompt = f"""You are a senior patent attorney drafting the "Brief Description of the Drawings"
+for an Indian Complete Specification patent.
 
 INVENTION ABSTRACT:
-{abstract}
+{abstract[:1000]}
 
 {f"USER INFO: {figure_descriptions}" if figure_descriptions else ""}
 
-NUMBER OF FIGURES: {num_figures}
+NUMBER OF FIGURES TO GENERATE: {num_figures}
 
-REAL PATENT EXAMPLE:
+REFERENCE PATENT EXAMPLES:
+Figure 1: illustrates a block diagram of a system according to the present invention.
+Figure 2: illustrates an arrangement of primary components according to the present invention.
+Figure 3: illustrates a control unit coupled to system components according to the present invention.
+Figure 4: illustrates a cross-sectional view of internal components according to the present invention.
+Figure 5: illustrates an exploded view of the system components according to the present invention.
 
-Figure 1: illustrates a block diagram of IoT based remote monitoring and multi-modal alerting system for human-animal conflict mitigation according to the present invention.
-Figure 2: illustrates setup of the IoT based remote monitoring and multi-modal alerting system according to the present invention.
-Figure 3: illustrates a block diagram of an integrated dual-communication system according to the present invention.
-Figure 6: illustrates a comparative network reliability across locations.
-Figure 7: illustrates a latency of edge-based AI decision-making.
+MANDATORY RULES:
+1. Format MUST be exactly: "Figure X: illustrates [description]."
+2. Use lowercase "illustrates" only.
+3. Write EXACTLY {num_figures} figures — no more, no less.
+4. Figures MUST be numbered sequentially from Figure 1 to Figure {num_figures}.
+5. Each figure description MUST be on a separate line.
+6. System / apparatus / setup / block diagram figures MUST end with:
+   "according to the present invention."
+7. Data / graph / comparison figures MUST NOT include
+   "according to the present invention."
+8. Do NOT write "Figure X is".
+9. Do NOT include headings, explanations, or blank lines.
+10. Do NOT stop after Figure 1 — continue until Figure {num_figures}.
+11. DO NOT use "is", "FIG.", "FIGURE", or "illustrating".
+    ONLY use: "Figure X: illustrates ..."
 
-RULES:
-1. Format: "Figure X: illustrates [description]." (lowercase "illustrates")
-2. System figures: END with "according to the present invention"
-3. Data figures: NO "according to..." - just describe
-4. Types: block diagram, setup, flowchart, comparative, detailed view
-5. One line per figure, ends with period
-6. Write EXACTLY {num_figures} figures
+NOW WRITE ONLY THE FIGURE DESCRIPTIONS
+(one line per figure, no heading, no extra text):
 
-NOW WRITE (only text, no heading):
+Each line MUST begin exactly with:
+Figure X: illustrates
 
-Figure 1:"""
+"""
+
 
     best_result = None
     best_score = float('inf')
-    
+
     for attempt in range(max_attempts):
         try:
-            response = llm(
-                prompt=prompt,
-                max_tokens=600,
-                temperature=0.2 if attempt == 0 else 0.25 + (attempt * 0.1),
-                stop=["DETAILED DESCRIPTION", "\n\n\n\n"],
-                top_p=0.85,
-                repeat_penalty=1.2
-            )
+            print(f"   Attempt {attempt + 1}/{max_attempts}...", end=" ", flush=True)
             
-            raw_text = "Figure 1:" + response["choices"][0]["text"].strip()
+            # CORRECTED: Removed max_input_tokens parameter
+            generated = llm_generate(
+                prompt,
+                max_new_tokens=650,
+                temperature=0.18 if attempt == 0 else 0.22 + (attempt * 0.08),
+                top_p=0.85,
+                repeat_penalty=1.22,
+                stop_strings=["\n\n\n", "\n\nDETAILED", "\n\nCLAIMS"]
+            )
+
+            if not generated or len(generated.strip()) < 50:
+                print("Too short")
+                continue
+
+            raw_text = generated.strip()
             cleaned_text = clean_brief_description(raw_text)
             validation = validate_brief_description(cleaned_text, num_figures)
-            
+
             score = len(validation["issues"]) * 20 + len(validation["warnings"]) * 5
-            
+
             result = {
                 "text": cleaned_text,
                 "valid": validation["valid"],
@@ -232,17 +244,27 @@ Figure 1:"""
                 "attempt": attempt + 1,
                 "score": score
             }
-            
+
+            print(f"Score: {score}, Figures: {validation['figure_count']}/{num_figures}")
+            print("----- GENERATED TEXT -----")
+            print(cleaned_text)
+            print("--------------------------")
+
+
             if validation["valid"] and len(validation["warnings"]) <= 1:
+                print("   ✅ Good!")
                 return result
-            
+
             if score < best_score:
                 best_score = score
                 best_result = result
-                
+
         except Exception as e:
+            print(f"ERROR: {e}")
+            import traceback
+            traceback.print_exc()
             continue
-    
+
     return best_result if best_result else {
         "text": "",
         "valid": False,
@@ -250,19 +272,22 @@ Figure 1:"""
         "warnings": [],
         "figure_count": 0,
         "expected_count": num_figures,
-        "attempt": max_attempts
+        "attempt": max_attempts,
+        "score": 999
     }
 
 
-# BACKWARD COMPATIBILITY WRAPPER
+# ============================================================
+# BACKWARD COMPATIBILITY
+# ============================================================
 def generate_drawing_descriptions(abstract: str, num_figures: int = None, max_attempts: int = 2) -> Dict[str, any]:
-    """
-    Backward compatibility wrapper for existing app.py.
-    Calls generate_brief_description internally.
-    """
+    """Backward compatibility wrapper for existing app.py."""
     return generate_brief_description(abstract, num_figures, "", max_attempts)
 
 
+# ============================================================
+# FORMATTING
+# ============================================================
 def format_for_patent_document(brief_desc_text: str, include_heading: bool = True) -> str:
     """Format the brief description with Indian Patent Office standard heading."""
     if include_heading:
@@ -270,47 +295,62 @@ def format_for_patent_document(brief_desc_text: str, include_heading: bool = Tru
     return brief_desc_text
 
 
+# ============================================================
+# CLI
+# ============================================================
 if __name__ == "__main__":
     print("=" * 80)
     print("   BRIEF DESCRIPTION OF DRAWINGS GENERATOR")
     print("=" * 80)
+
+    print("\n📥 Abstract (press Enter twice to finish):")
+    lines = []
+    while True:
+        line = input()
+        if line.strip() == "" and lines:
+            break
+        if line.strip():
+            lines.append(line)
     
-    print("\n📥 Abstract:")
-    abstract = input("> ").strip()
-    
+    abstract = " ".join(lines).strip()
+
     if not abstract:
         print("❌ Abstract required")
         exit(1)
-    
+
     print("\n🔢 Number of figures? (Enter for auto): ", end="")
     num_input = input().strip()
     num_figures = int(num_input) if num_input.isdigit() else None
-    
+
     print("\n⏳ Generating...")
-    
     result = generate_brief_description(abstract, num_figures)
-    
+
     if not result["text"]:
         print("\n❌ ERROR:")
         for issue in result["issues"]:
             print(f"   • {issue}")
         exit(1)
-    
+
     print("\n" + "=" * 80)
-    print(f"✅ Generated {result['figure_count']} figures | Attempt: {result['attempt']}")
-    
+    print(f"✅ Generated {result['figure_count']}/{result['expected_count']} figures | Attempt: {result['attempt']}")
+
     if result["issues"]:
         print("\n🚨 ISSUES:")
         for issue in result["issues"]:
             print(f"   • {issue}")
-    
+
     if result["warnings"]:
         print("\n⚠️  WARNINGS:")
         for warning in result["warnings"]:
             print(f"   • {warning}")
-    
+
     print("\n" + "=" * 80)
     print("📝 GENERATED TEXT:")
     print("-" * 80)
     print(result["text"])
+    print("-" * 80)
+    
+    print("\n📄 FORMATTED FOR PATENT:")
+    print("=" * 80)
+    print(format_for_patent_document(result["text"]))
     print("=" * 80)
