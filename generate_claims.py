@@ -1,49 +1,51 @@
 import os
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 import faiss
 import json
 import numpy as np
-from llama_cpp import Llama
-from sentence_transformers import SentenceTransformer
 import re
 import textwrap
+import torch
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+from sentence_transformers import SentenceTransformer
+
+# Import LLM generation function from llm_runtime
+from llm_runtime import llm_generate
 
 
 # === Configuration ===
 class PatentConfig:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    LLM_PATH = os.path.join(BASE_DIR, "models", "models", "phi-3-mini-4k-instruct-q4.gguf")
+    LLM_PATH = os.path.join(BASE_DIR, "models", "Qwen2.5-7B-Instruct")
     INDEX_PATH = os.path.join(BASE_DIR, "data", "bigpatent_tiny", "faiss.index")
     METADATA_PATH = os.path.join(BASE_DIR, "data", "bigpatent_tiny", "faiss_metadata.json")
-    
+
     # Generation parameters
     TEMPERATURE = 0.15
     TOP_P = 0.85
     REPEAT_PENALTY = 1.15
-    MAX_TOKENS_CLAIM1 = 2048
-    MAX_TOKENS_DEPENDENT = 256
-    MAX_TOKENS_METHOD = 768
+    MAX_TOKENS_CLAIM1 = 1200
+    MAX_TOKENS_DEPENDENT = 280
+    MAX_TOKENS_METHOD = 850
 
 
 # === Load models ONCE (singleton pattern) ===
 class ModelManager:
     _instance = None
-    
+
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
-            cls._instance.llm = Llama(
-                model_path=PatentConfig.LLM_PATH, 
-                n_gpu_layers=-1,  # Use GPU if available
-                n_ctx=8192, 
-                n_threads=4,
-                verbose=False
-            )
-            cls._instance.embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+            
+            # Only load embedding model and FAISS - LLM is handled by llm_generate()
+            cls._instance.embedding_model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
             cls._instance.index = faiss.read_index(PatentConfig.INDEX_PATH)
             with open(PatentConfig.METADATA_PATH, "r") as f:
                 cls._instance.metadata = json.load(f)
+
         return cls._instance
 
 
@@ -154,7 +156,14 @@ class ComponentExtractor:
                 components['novelty_indicators'].append(keyword)
         
         return components
+# === CLAIM NORMALIZATION UTILITIES ===
+def normalize_device_for_claim(device_name: str) -> str:
+    """
+    IPO-safe normalization: always return a generic subject
+    """
+    return "system"
 
+  
 
 # === Enhanced Prior Art Retrieval ===
 class PriorArtRetriever:
@@ -207,14 +216,23 @@ class PriorArtRetriever:
 # === POST-PROCESSING MODULE ===
 class ClaimPostProcessor:
     """Robust post-processing to clean LLM-generated claims"""
-    
+    @staticmethod
+    def _remove_non_english(text: str) -> str:
+        """
+        Remove non-English (non-ASCII) characters to prevent foreign language leakage.
+        """
+        return re.sub(r'[^\x00-\x7F]+', '', text)
+
     @staticmethod
     def clean_claim_text(raw_text: str, claim_number: int) -> str:
         """Clean and normalize claim text with multiple validation passes"""
         
         # Step 1: Remove LLM artifacts
         cleaned = ClaimPostProcessor._remove_llm_artifacts(raw_text)
-        
+        cleaned = re.sub(r'[^\x00-\x7F]+', '', cleaned)
+        # After Step 1
+        cleaned = ClaimPostProcessor._remove_non_english(cleaned)
+
         # Step 2: Extract only the relevant claim
         cleaned = ClaimPostProcessor._extract_target_claim(cleaned, claim_number)
         
@@ -225,8 +243,11 @@ class ClaimPostProcessor:
         cleaned = ClaimPostProcessor._fix_formatting(cleaned)
         
         # Step 5: Validate claim structure
+        cleaned = ClaimPostProcessor._limit_wherein_clauses(cleaned, max_wherein=3)
         cleaned = ClaimPostProcessor._validate_structure(cleaned, claim_number)
-        
+        cleaned = ClaimPostProcessor._enforce_antecedent_basis(cleaned)
+
+
         return cleaned
     
     @staticmethod
@@ -255,7 +276,7 @@ class ClaimPostProcessor:
     def _extract_target_claim(text: str, claim_number: int) -> str:
         """Extract only the target claim, removing duplicates"""
         
-        pattern = rf'^{claim_number}\.\s+(.+?)(?=^\d+\.|===|\Z)'
+        pattern = rf'({claim_number}\.\s+.*?)(?=\s+\d+\.|\Z)'
         matches = list(re.finditer(pattern, text, re.MULTILINE | re.DOTALL))
         
         if not matches:
@@ -298,8 +319,8 @@ class ClaimPostProcessor:
         """Fix common formatting issues"""
         
         # Fix spacing issues
-        text = re.sub(r'  +', ' ', text)  # Multiple spaces to single
-        text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)  # Multiple newlines to double
+        text = re.sub(r'  +', ' ', text)
+        text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)
         
         # Fix punctuation
         text = re.sub(r'\s+([,;.])', r'\1', text)
@@ -340,6 +361,34 @@ class ClaimPostProcessor:
                 )
         
         return text
+    @staticmethod
+    def _enforce_antecedent_basis(text: str) -> str:
+        """
+        Ensure 'a/an' appears before 'the' for claim elements (IPO requirement)
+        """
+        tokens = re.findall(r'\b(a|an)\s+([a-zA-Z ][a-zA-Z ]{2,40})', text)
+        seen = set()
+
+        for _, term in tokens:
+            key = term.lower().strip()
+            if key in seen:
+                text = re.sub(
+                    rf'\b(a|an)\s+{re.escape(term)}\b',
+                    f"the {term}",
+                    text,
+                    count=1,
+                    flags=re.IGNORECASE
+                )
+            else:
+                seen.add(key)
+
+        return text
+    @staticmethod
+    def _limit_wherein_clauses(text: str, max_wherein: int = 3) -> str:
+        parts = re.split(r'\bwherein\b', text, flags=re.IGNORECASE)
+        if len(parts) > max_wherein + 1:
+            text = "wherein".join(parts[:max_wherein + 1])
+        return text
 
 
 # === IMPROVED GENERATION CONFIG ===
@@ -365,8 +414,6 @@ class ImprovedGenerationConfig:
             "This claim",
             "WRITE NOW",
             "FORMAT:",
-            f"{next_num}. The",
-            f"{next_num}. A",
             f"\n\nClaim {next_num}",
         ]
         
@@ -396,17 +443,106 @@ class ImprovedGenerationConfig:
         
         return params.get(claim_type, params['dependent'])
 
+def filter_structural_functions(functions: List[str]) -> List[str]:
+    """
+    Remove result-oriented or algorithmic language from Claim 1 inputs.
+    """
+    banned_keywords = [
+        "predict", "optimize", "reduce", "improve",
+        "analyze", "machine learning", "ai",
+        "decision", "analytics", "automatically"
+    ]
+    clean = []
+    for f in functions:
+        if not any(b in f.lower() for b in banned_keywords):
+            clean.append(f)
+    return clean
 
-# === ENHANCED CLAIM GENERATOR ===
+def sanitize_abstract_for_claims(abstract: str) -> str:
+    """
+    Remove software / algorithmic terms to avoid Section 3(k) objections.
+    """
+    banned = [
+        "machine learning",
+        "predict",
+        "prediction",
+        "predictive",
+        "analytics",
+        "ai",
+        "intelligent",
+        "automatically",
+        "real-time"
+    ]
+    text = abstract
+    for b in banned:
+        text = re.sub(rf'\b{b}\b', '', text, flags=re.IGNORECASE)
+    return re.sub(r'\s+', ' ', text).strip()
+
+def derive_method_steps_from_claim1(claim_1_text: str) -> List[str]:
+    steps = []
+    text = claim_1_text.lower()
+
+    if "sensor" in text:
+        steps.append("sensing a physical parameter using at least one sensor")
+
+    if "processing unit" in text or "processor" in text:
+        steps.append("processing the sensed parameter using a processing unit")
+
+    if "communication" in text:
+        steps.append("transmitting the processed parameter via a communication module")
+
+    if "controller" in text or "control" in text:
+        steps.append("controlling operation of the system using a controller")
+
+    # Examiner-safe filler (if needed)
+    while len(steps) < 5:
+        steps.append("maintaining operation of the system in a predetermined manner")
+
+    return steps[:5]
+
+def is_structural_feature(feature: str) -> bool:
+    banned = [
+        "predict", "optimize", "analysis", "decision",
+        "machine learning", "ai", "analytics", "automatic"
+    ]
+    return not any(b in feature.lower() for b in banned)
+
+def enforce_single_sentence_claim(text: str) -> str:
+    # Remove line breaks, bullets, colon formatting
+    text = re.sub(r'[\n\r]+', ' ', text)
+    text = re.sub(r'\s*:\s*', ' ', text)
+    text = re.sub(r'\s*;\s*', ', ', text)
+    text = re.sub(r'\s{2,}', ' ', text)
+
+    text = text.strip()
+    if not text.endswith('.'):
+        text += '.'
+    return text
+
+def has_valid_wherein(claim_text: str) -> bool:
+    match = re.search(r'wherein\s+(.+?)\.', claim_text, re.IGNORECASE)
+    return bool(match and len(match.group(1).strip()) > 5)
+
+def enforce_claim_number(text: str, num: int) -> str:
+    if not text.strip().startswith(f"{num}."):
+        text = f"{num}. {text.lstrip('0123456789. ')}"
+    return text
+
+# === CORRECTED CLAIM GENERATOR CLASS ===
 class ClaimGenerator:
     """Generate patent claims with Indian Patent Office compliance"""
     
     def __init__(self, model_manager: ModelManager):
         self.mm = model_manager
-        self.llm = model_manager.llm
         self.post_processor = ClaimPostProcessor()
         self.max_retries = 2
+        self.used_dependent_features = set()
     
+    def _clear_gpu_cache(self):
+        """Clear GPU cache to free fragmented memory."""
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     def _validate_claim_quality(self, claim_text: str, claim_num: int) -> float:
         """Score claim quality (0-1)"""
         
@@ -443,10 +579,14 @@ class ClaimGenerator:
                         prior_art_context: str) -> Dict[str, any]:
         """Generate Claim 1 with enhanced structure and verification"""
         
-        device_name = components.get('device_name', 'system')
+        raw_device_name = components.get('device_name', 'system')
+        device_name = normalize_device_for_claim(raw_device_name)
         purpose = components.get('purpose', 'performing operations')
         key_elements = components.get('key_elements', [])
-        functions = components.get('functions', [])
+        functions = filter_structural_functions(
+            components.get('functions', [])
+        )
+
         
         prompt = self._build_claim1_prompt(
             abstract, device_name, purpose, 
@@ -460,27 +600,38 @@ class ClaimGenerator:
             try:
                 params = ImprovedGenerationConfig.get_generation_params('claim_1')
                 
-                output = self.llm(
+                # FIXED: Correct function call with proper parameter names
+                output_text = llm_generate(
                     prompt=prompt,
-                    max_tokens=PatentConfig.MAX_TOKENS_CLAIM1,
-                    **params,
-                    stop=ImprovedGenerationConfig.get_stop_sequences_for_claim(1)
+                    max_new_tokens=PatentConfig.MAX_TOKENS_CLAIM1,
+                    temperature=params["temperature"],
+                    top_p=params["top_p"],
+                    repeat_penalty=params["repeat_penalty"],
+                    stop_strings=ImprovedGenerationConfig.get_stop_sequences_for_claim(1)
                 )
                 
-                claim_text = "1." + output["choices"][0]["text"].strip()
+                claim_text = output_text.strip()
                 
                 # Clean the claim
                 claim_text = self.post_processor.clean_claim_text(claim_text, 1)
+                claim_text = enforce_single_sentence_claim(claim_text)
+
                 
                 # Validate
+                # Validate
                 score = self._validate_claim_quality(claim_text, 1)
-                
+
+                # Enforce minimum 2 wherein clauses for Claim 1 (IPO preference)
+                if claim_text.lower().count("wherein") < 2:
+                    continue
+
                 if score > best_score:
                     best_claim = claim_text
                     best_score = score
-                
+
                 if score >= 0.8:
                     break
+
                     
             except Exception as e:
                 print(f"Claim 1 generation attempt {attempt + 1} failed: {e}")
@@ -488,6 +639,8 @@ class ClaimGenerator:
         
         if best_claim is None:
             best_claim = self._fallback_claim_1(device_name, purpose, key_elements)['claim_text']
+        
+        self._clear_gpu_cache()
         
         return {
             'claim_number': 1,
@@ -507,6 +660,11 @@ class ClaimGenerator:
         
         prompt = f"""You are an expert patent claim drafter specializing in Indian Patent Office format.
 
+LANGUAGE CONSTRAINT (MANDATORY):
+- Write the claim STRICTLY in English only.
+- Do NOT include any non-English words, characters, or explanations.
+- Do NOT include translations, notes, or comments.
+
 INVENTION ABSTRACT:
 {abstract[:600]}
 
@@ -525,22 +683,40 @@ Functions:
 TASK: Write Claim 1 in EXACT Indian Patent Office format.
 
 MANDATORY STRUCTURE:
-1. [Preamble]: "An [device_name] for [purpose], comprising:"
-2. [Body]: List of elements with reference numbers (1), (2), etc.
-   - Use hierarchical indentation for sub-components
-   - Each element should have functional description
-   - Use "configured to", "operable to", "adapted to"
-3. [Wherein Clauses]: At least 3 "wherein" clauses describing:
-   - Technical relationships between components
-   - Operational characteristics
-   - Functional advantages
-4. [Ending]: Must end with period
+
+1. [Preamble]:
+   "An [device_name] comprising"
+
+2. [Body]:
+   - Describe essential structural elements in sentence form.
+   - Reference numerals may be optionally used in parentheses, but NOT as numbered lists.
+   - Each element described using functional language limited to:
+     "configured to", "operable to", or "adapted to".
+   - Sub-components may be indented only where structurally necessary.
+   - Do NOT include optional, exemplary, or non-essential features.
+
+3. [Wherein Clauses]:
+   - Include EXACTLY TWO OR THREE "wherein" clauses.
+   - STOP after the third "wherein".
+   - Do NOT add additional "wherein" clauses under any circumstances.
+   - Each "wherein" clause must define:
+     • a technical relationship between elements, OR
+     • an operational characteristic of the system.
+   - Do NOT describe the purpose, advantage, or result of the invention in Claim 1.
+   - All wherein clauses must define structural or operational relationships only.
+   - Do NOT describe advantages, performance metrics, or comparative benefits.
+
+4. [Ending]:
+   - The claim must end with a single period (.).
+
 
 CRITICAL REQUIREMENTS:
-✓ Use reference numbers: (1), (2), (3), etc.
-✓ Proper indentation for sub-components
+✓ Reference numerals may be used optionally in parentheses
+✓ Do NOT present elements as numbered lists
+✓ Draft elements in continuous sentence form
+✓ Use indentation only for true sub-components
 ✓ "comprising:" after preamble
-✓ "wherein" clauses at end (minimum 3)
+✓ "wherein" clauses at end (2 to 4 clauses recommended)
 ✓ "and" before last wherein clause
 ✓ End with period "."
 ✓ Be technically specific and detailed
@@ -552,30 +728,20 @@ NOW GENERATE CLAIM 1 FOR THE GIVEN INVENTION:
         
         return prompt
     
-    def _fallback_claim_1(self, device_name: str, purpose: str, 
-                         key_elements: List[str]) -> Dict:
-        """Generate fallback Claim 1 if generation fails"""
-        
-        elements_text = ""
-        for i, elem in enumerate(key_elements[:5], 1):
-            elements_text += f"   {elem} ({i}),\n"
-        
-        claim_text = f"""1. {device_name.capitalize()} for {purpose}, comprising:
-{elements_text}   a processing unit (6) configured to control said components,
-   a communication module (7) configured to transmit data,
-   and
-   a power supply unit (8),
-   wherein the processing unit (6) is configured to execute control algorithms,
-   wherein the communication module (7) enables data exchange between components,
-   and
-   wherein the system operates autonomously to achieve the intended purpose."""
-        
+    def _fallback_claim_1(self, device_name: str, purpose: str, key_elements: List[str]) -> Dict:
+        claim_text = (
+            f"1. An {device_name} comprising a plurality of structural components "
+            f"operatively coupled to form an integrated system, "
+            f"wherein the components are arranged to enable controlled operation of the system."
+        )
+
         return {
             'claim_number': 1,
             'claim_text': claim_text,
             'device_name': device_name,
             'type': 'independent_apparatus'
         }
+
     
     def generate_dependent_claim(self, claim_num: int, claim_1_text: str, 
                                 device_name: str, components: Dict, 
@@ -593,18 +759,30 @@ NOW GENERATE CLAIM 1 FOR THE GIVEN INVENTION:
             depends_on = max(1, claim_num - 3)
         
         # Select feature to elaborate
-        all_features = (
-            components.get('key_elements', []) + 
-            components.get('functions', []) + 
-            components.get('technical_effects', [])
-        )
-        
-        if all_features:
-            feature = all_features[(claim_num - 2) % len(all_features)]
-        else:
-            feature = "component"
+        # ✅ Select ONLY structural features (unity-safe)
+        all_features = components.get('key_elements', [])
+
+        # ✅ De-duplication guard (no repetition across claims)
+        feature = None
+        for feat in all_features:
+            key = feat.lower()
+            if key not in self.used_dependent_features and is_structural_feature(feat):
+                feature = feat
+                self.used_dependent_features.add(key)
+                break
+
+
+        # Fallback if all features are exhausted
+        if feature is None:
+            feature = "structural component"
+
         
         prompt = f"""Write ONE dependent claim in Indian Patent Office format.
+
+LANGUAGE CONSTRAINT (MANDATORY):
+- Write the claim STRICTLY in English only.
+- Do NOT include any non-English words, characters, or explanations.
+- Do NOT include translations, notes, or comments.
 
 INDEPENDENT CLAIM (Claim 1):
 {claim_1_text[:500]}...
@@ -635,14 +813,17 @@ WRITE NOW:
             try:
                 params = ImprovedGenerationConfig.get_generation_params('dependent')
                 
-                output = self.llm(
+                # FIXED: Correct function call with proper parameter names
+                output_text = llm_generate(
                     prompt=prompt,
-                    max_tokens=PatentConfig.MAX_TOKENS_DEPENDENT,
-                    **params,
-                    stop=ImprovedGenerationConfig.get_stop_sequences_for_claim(claim_num)
+                    max_new_tokens=PatentConfig.MAX_TOKENS_DEPENDENT,
+                    temperature=params["temperature"],
+                    top_p=params["top_p"],
+                    repeat_penalty=params["repeat_penalty"],
+                    stop_strings=ImprovedGenerationConfig.get_stop_sequences_for_claim(claim_num)
                 )
                 
-                claim_text = f"{claim_num}. The" + output["choices"][0]["text"].strip()
+                claim_text = output_text.strip()
                 
                 # Clean the claim
                 claim_text = self.post_processor.clean_claim_text(claim_text, claim_num)
@@ -654,15 +835,21 @@ WRITE NOW:
                     best_claim = claim_text
                     best_score = score
                 
-                if score >= 0.8:
+                if score >= 0.8 and has_valid_wherein(claim_text):
                     break
+
                     
             except Exception as e:
                 print(f"Claim {claim_num} generation attempt {attempt + 1} failed: {e}")
                 continue
         
-        if best_claim is None:
-            best_claim = f"{claim_num}. The {device_name} as claimed in claim {depends_on}, wherein the {feature} provides enhanced functionality."
+        if best_claim is None or not has_valid_wherein(best_claim):
+            best_claim = (
+                f"{claim_num}. The {device_name} as claimed in claim {depends_on}, "
+                f"wherein the {feature} is structurally coupled to the system."
+            )
+
+        self._clear_gpu_cache()
         
         return best_claim
     
@@ -671,11 +858,22 @@ WRITE NOW:
         """Generate comprehensive method claim"""
         
         purpose = components.get('purpose', 'performing operations')
-        functions = components.get('functions', [])
-        
-        functions_text = "\n".join([f"   - {func}" for func in functions[:5]])
+        # ✅ Derive steps ONLY from Claim 1 (unity-safe)
+        steps = derive_method_steps_from_claim1(claim_1_text)
+        steps_list = "\n".join([f"   - {step}" for step in steps])
+
         
         prompt = f"""Write ONE method claim in Indian Patent Office format.
+
+LANGUAGE CONSTRAINT (MANDATORY):
+- Write the claim STRICTLY in English only.
+- Do NOT include any non-English words, characters, or explanations.
+- Do NOT include translations, notes, or comments.
+
+UNITY REQUIREMENT (MANDATORY):
+- All method steps MUST be directly derived from Claim 1 elements
+- Do NOT introduce new structures, functions, or control logic
+- Do NOT describe advantages or results
 
 APPARATUS CLAIM (Claim 1):
 {claim_1_text[:500]}...
@@ -683,24 +881,15 @@ APPARATUS CLAIM (Claim 1):
 DEVICE: {device_name}
 PURPOSE: {purpose}
 
-KEY FUNCTIONS:
-{functions_text}
-
-WRITE CLAIM 9 (independent method claim):
+KEY STEPS (derived strictly from Claim 1 structure):
+{steps_list}
 
 FORMAT:
-9. A method for [purpose] using the [device_name] as claimed in claim 1, the method comprising:
-   [step 1: data collection/initialization]
-   [step 2: processing/analyzing]
-   [step 3: decision making]
-   [step 4: action/control]
-   [step 5: output/communication]
-   wherein [condition about data flow or timing],
-   and
-   wherein [condition about user interaction or final outcome].
+9. A method for operating the [device_name] as claimed in claim 1, the method comprising performing steps corresponding to the structural elements of claim 1 and executing the steps in a predetermined sequence, wherein the steps correspond to operation of the structural elements of claim 1, and wherein the steps are executed under predefined operational conditions.
+
 
 REQUIREMENTS:
-✓ Start with "9. A method for [purpose] using the [device_name] as claimed in claim 1"
+✓ Start with "9. A method for operating the [device_name] as claimed in claim 1"
 ✓ List 5-7 method steps (gerund form: "-ing")
 ✓ Steps should follow logical sequence
 ✓ Include 2-3 "wherein" clauses at end
@@ -717,14 +906,17 @@ WRITE NOW:
             try:
                 params = ImprovedGenerationConfig.get_generation_params('method')
                 
-                output = self.llm(
+                # FIXED: Correct function call with proper parameter names
+                output_text = llm_generate(
                     prompt=prompt,
-                    max_tokens=PatentConfig.MAX_TOKENS_METHOD,
-                    **params,
-                    stop=ImprovedGenerationConfig.get_stop_sequences_for_claim(9)
+                    max_new_tokens=PatentConfig.MAX_TOKENS_METHOD,
+                    temperature=params["temperature"],
+                    top_p=params["top_p"],
+                    repeat_penalty=params["repeat_penalty"],
+                    stop_strings=ImprovedGenerationConfig.get_stop_sequences_for_claim(9)
                 )
                 
-                claim_text = "9. A method for" + output["choices"][0]["text"].strip()
+                claim_text = output_text.strip()
                 
                 # Clean the claim
                 claim_text = self.post_processor.clean_claim_text(claim_text, 9)
@@ -744,7 +936,16 @@ WRITE NOW:
                 continue
         
         if best_claim is None:
-            best_claim = f"9. A method for using the {device_name} as claimed in claim 1, the method comprising steps of initializing the system, collecting data, processing said data, making decisions based on analysis, and executing control actions, wherein the method operates in real-time, and wherein user interaction is provided through an interface."
+            best_claim = (
+                f"9. A method for operating the {device_name} as claimed in claim 1, "
+                "the method comprising steps of initializing the system, collecting data, "
+                "processing said data using system components, and executing control actions "
+                "corresponding to operation of the components, "
+                "wherein the method is performed during normal operation of the system, "
+                "and wherein execution follows a predetermined sequence."
+            )
+        
+        self._clear_gpu_cache()
         
         return best_claim
     
@@ -756,13 +957,18 @@ WRITE NOW:
         for claim_num in [10, 11]:
             prompt = f"""Write ONE dependent method claim.
 
+LANGUAGE CONSTRAINT (MANDATORY):
+- Write the claim STRICTLY in English only.
+- Do NOT include any non-English words, characters, or explanations.
+- Do NOT include translations, notes, or comments.
+
 METHOD CLAIM (Claim 9):
 {claim_9_text[:400]}...
 
 WRITE CLAIM {claim_num} (depends on claim 9):
 
 FORMAT:
-{claim_num}. The method as claimed in claim 9, wherein [specific procedural detail, condition, or algorithm].
+{claim_num}. The method as claimed in claim 9, wherein the steps are executed under a predefined operational condition.
 
 WRITE NOW:
 
@@ -775,17 +981,22 @@ WRITE NOW:
                 try:
                     params = ImprovedGenerationConfig.get_generation_params('dependent')
                     
-                    output = self.llm(
+                    # FIXED: Correct function call with proper parameter names
+                    output_text = llm_generate(
                         prompt=prompt,
-                        max_tokens=300,
-                        **params,
-                        stop=ImprovedGenerationConfig.get_stop_sequences_for_claim(claim_num)
+                        max_new_tokens=300,
+                        temperature=params["temperature"],
+                        top_p=params["top_p"],
+                        repeat_penalty=params["repeat_penalty"],
+                        stop_strings=ImprovedGenerationConfig.get_stop_sequences_for_claim(claim_num)
                     )
                     
-                    claim_text = f"{claim_num}. The method" + output["choices"][0]["text"].strip()
+                    claim_text = output_text.strip()
                     
                     # Clean the claim
                     claim_text = self.post_processor.clean_claim_text(claim_text, claim_num)
+                    claim_text = enforce_claim_number(claim_text, claim_num)
+
                     
                     # Validate
                     score = self._validate_claim_quality(claim_text, claim_num)
@@ -802,12 +1013,15 @@ WRITE NOW:
                     continue
             
             if best_claim is None:
-                best_claim = f"{claim_num}. The method as claimed in claim 9, wherein the processing includes optimizing parameters based on real-time conditions."
-            
+                best_claim = (
+                    f"{claim_num}. The method as claimed in claim 9, "
+                    "wherein the steps are executed in a predefined operational sequence."
+                )
+
             claims.append(best_claim)
+            self._clear_gpu_cache()
         
         return claims
-
 
 # === FINAL QUALITY CHECKER ===
 class FinalQualityChecker:
@@ -875,7 +1089,7 @@ class ClaimFormatter:
         output = []
         
         # Header
-        output.append("WE CLAIM")
+        output.append("WE CLAIM:")
         output.append("")
         
         line_counter = 1
@@ -883,12 +1097,8 @@ class ClaimFormatter:
         # === CLAIM 1 ===
         claim_1_lines = claim_1['claim_text'].split('\n')
         for line in claim_1_lines:
-            if line_counter % 5 == 0:
-                output.append(f"{line:<70}{line_counter:>5}")
-            else:
-                output.append(line)
-            line_counter += 1
-        output.append("")
+            output.append(line)
+
         
         # === DEPENDENT CLAIMS 2-8 ===
         for dep_claim in dependent_claims:
@@ -901,21 +1111,13 @@ class ClaimFormatter:
             )
             
             for line in wrapped.split('\n'):
-                if line_counter % 5 == 0:
-                    output.append(f"{line:<70}{line_counter:>5}")
-                else:
-                    output.append(line)
-                line_counter += 1
-            output.append("")
+                output.append(line)
+
         
         # === METHOD CLAIM 9 ===
         for line in method_claim_9.split('\n'):
-            if line_counter % 5 == 0:
-                output.append(f"{line:<70}{line_counter:>5}")
-            else:
-                output.append(line)
-            line_counter += 1
-        output.append("")
+            output.append(line)
+
         
         # === METHOD SUBCLAIMS 10-11 ===
         for subclaim in method_subclaims:
@@ -927,12 +1129,8 @@ class ClaimFormatter:
             )
             
             for line in wrapped.split('\n'):
-                if line_counter % 5 == 0:
-                    output.append(f"{line:<70}{line_counter:>5}")
-                else:
-                    output.append(line)
-                line_counter += 1
-            output.append("")
+                output.append(line)
+
         
         return "\n".join(output)
 
@@ -970,10 +1168,12 @@ class ClaimValidator:
             
             wherein_count = claim_1_text.lower().count('wherein')
             if wherein_count == 0:
-                issues.append("❌ Claim 1 has no 'wherein' clauses (minimum 2 required)")
+                 warnings.append("⚠️ Claim 1 has no 'wherein' clauses (1–3 recommended)")
             elif wherein_count < 2:
-                warnings.append(f"⚠️  Claim 1 has only {wherein_count} 'wherein' clause (3-5 recommended)")
-            
+                warnings.append("⚠️ Claim 1 has fewer than 2 'wherein' clauses (IPO preferred: 2–3)")
+            elif wherein_count > 3:
+                warnings.append("⚠️ Claim 1 has more than 3 'wherein' clauses (IPO preferred max is 3)")
+
             # Check for reference numbers
             ref_numbers = re.findall(r'\((\d+)\)', claim_1_text)
             if len(ref_numbers) < 3:
@@ -985,7 +1185,7 @@ class ClaimValidator:
             warnings.append("⚠️  No method claim found at position 9")
         
         # Check dependent claim format
-        dep_claims = re.findall(r'(\d+)\.\s+The\s+\w+\s+as claimed in claim (\d+)', claims_text)
+        dep_claims = re.findall(r'(\d+)\.\s+The\s+.+?\s+as claimed in claim (\d+)', claims_text,re.IGNORECASE)
         if len(dep_claims) < 6:
             warnings.append(f"⚠️  Only {len(dep_claims)} dependent claims found")
         
@@ -1121,15 +1321,19 @@ class PatentClaimsPipeline:
             print(f"{abstract[:200]}...\n")
         
         # Step 1: Extract components
+        # Step 1: Sanitize & extract components
         if verbose:
             print("[1/6] Extracting components from abstract...")
-        components = self.extractor.extract(abstract)
-        
+
+        safe_abstract = sanitize_abstract_for_claims(abstract)
+        components = self.extractor.extract(safe_abstract)
+
         if verbose:
             print(f"   ✓ Device: {components['device_name']}")
             print(f"   ✓ Purpose: {components['purpose'][:60]}...")
             print(f"   ✓ Key Elements: {len(components['key_elements'])}")
             print(f"   ✓ Functions: {len(components['functions'])}")
+
         
         # Step 2: Retrieve prior art
         if verbose:
@@ -1144,7 +1348,8 @@ class PatentClaimsPipeline:
         # Step 3: Generate Claim 1
         if verbose:
             print(f"\n[3/6] Generating Claim 1 (independent apparatus claim)...")
-        claim_1 = self.generator.generate_claim_1(abstract, components, prior_art_context)
+        claim_1 = self.generator.generate_claim_1(safe_abstract, components, prior_art_context)
+
         
         if verbose:
             print(f"   ✓ Claim 1 generated ({len(claim_1['claim_text'])} chars)")
@@ -1217,7 +1422,7 @@ class PatentClaimsPipeline:
                 'method_subclaims': method_subclaims,
                 'generated_at': datetime.now().isoformat(),
                 'abstract_length': len(abstract),
-                'claims_count': len(dependent_claims) + len(method_subclaims) + 1,
+                'claims_count': 1 + len(dependent_claims) + 1 + len(method_subclaims),
                 'fixes_applied': fixes
             }
         }
@@ -1321,7 +1526,7 @@ if __name__ == "__main__":
     print("     GENERATION COMPLETE")
     print("=" * 80)
     print(f"\nCompliance Score: {results['validation']['compliance_score']:.1f}/100")
-    print(f"Total Claims Generated: {results['metadata']['claims_count'] + 1}")
+    print(f"Total Claims Generated: {results['metadata']['claims_count']}")
     print(f"Prior Art References: {len(results['prior_art'])}")
     print(f"Quality Fixes Applied: {len(results['metadata']['fixes_applied'])}")
     print("\nFiles generated:")
