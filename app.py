@@ -12,6 +12,7 @@ from generate_background import generate_background_locally
 from generate_detailed_description import generate_detailed_description
 from generate_brief_description import generate_brief_description
 from generate_summary_of_drawings import generate_drawing_descriptions as generate_drawing
+from generate_industrial_applicability import generate_industrial_applicability
 from generate_objects import generate_objects_of_invention
 from cpc_classifier import classify_cpc
 from export_to_pdf import create_patent_pdf
@@ -228,6 +229,30 @@ if st.session_state.get("brief_description"):
         st.write(st.session_state.brief_description)
 
 
+if st.button("🏭 Industrial Applicability"):
+    if not abstract:
+        st.warning("Please enter the abstract.")
+    else:
+        with st.spinner("Generating industrial applicability..."):
+            try:
+                result = generate_industrial_applicability(
+                    abstract=abstract,
+                    field_of_invention=field_of_invention if 'field_of_invention' in locals() else ""
+                )
+
+                if isinstance(result, dict):
+                    st.session_state.industrial_applicability = result.get("text", "")
+                else:
+                    st.session_state.industrial_applicability = result or "⚠️ No output generated."
+
+                st.success("Done!")
+            except Exception as e:
+                st.error(f"❌ Industrial applicability generation failed: {e}")
+
+if st.session_state.get("industrial_applicability"):
+    with st.expander("🏭 Industrial Applicability"):
+        st.write(st.session_state.industrial_applicability)
+
 if st.button("🖼️ Summary of Drawings"):
     if not abstract:
         st.warning("Please enter the invention abstract.")
@@ -268,7 +293,7 @@ st.markdown("---")
 st.markdown("## 🔍 Patent Quality Verification")
 st.info("🤖 6 AI Agents will analyze your patent for quality and compliance")
 
-if st.button("✅ Run 6-Agent Verification"):
+if st.button("✅ Run 5-Agent Verification"):
     # Check if required sections exist
     required = ['title', 'claims', 'abstract_input', 'background', 'summary']
     missing = [s for s in required if not st.session_state.get(s)]
@@ -276,7 +301,7 @@ if st.button("✅ Run 6-Agent Verification"):
     if missing:
         st.warning(f"⚠️ Please generate these sections first: {', '.join(missing)}")
     else:
-        with st.spinner("🤖 6 AI Agents verifying your patent... This may take 1-2 minutes"):
+        with st.spinner("🤖 5 AI Agents verifying your patent... This may take 1-2 minutes"):
             try:
                 from patent_verifier import verify_patent_5_sections
                 
@@ -331,6 +356,7 @@ pdf_sections = {
     "Summary of the Invention": st.session_state.get("summary", "[Not Generated]"),  # 6. Summary ✅ ADDED
     "Brief Description of the Drawings": st.session_state.get("brief_description", "[Not Generated]"),  # 7. Brief Desc
     "Detailed Description of the Invention": st.session_state.get("detailed_description", "[Not Generated]"),  # 8. Detailed
+    "Industrial Applicability": st.session_state.get("industrial_applicability"),
     "Claims": st.session_state.get("claims", "[Not Generated]"),  # 9. Claims LAST
 }
 
@@ -347,7 +373,8 @@ with st.expander("📋 Preview Export Sections (Indian Patent Office Order)"):
         ("6️⃣", "Summary of the Invention"),
         ("7️⃣", "Brief Description of the Drawings"),
         ("8️⃣", "Detailed Description of the Invention"),
-        ("9️⃣", "Claims")
+        ("9️⃣", "Industrial Applicability"),
+        ("🔟", "Claims")
     ]
     
     for emoji, section_name in section_list:
@@ -515,4 +542,4 @@ st.markdown("---")
 if st.button("🔄 Reset All"):
     for key in list(st.session_state.keys()):
         del st.session_state[key]
-    st.rerun()
+    st.rerun()  is it correct now
