@@ -1,4 +1,5 @@
 import re
+import json
 from typing import Dict, List
 from llm_runtime import llm_generate
 
@@ -7,38 +8,41 @@ from llm_runtime import llm_generate
 # FEATURE EXTRACTION
 # ============================================================
 def extract_key_features_from_abstract(abstract: str) -> Dict[str, any]:
-    """Extract key features and advantages to guide objects generation."""
-    features = {
-        'main_problem': '',
-        'key_technologies': [],
-        'benefits': [],
-        'applications': []
-    }
+    """Extract key features and advantages using LLM to guide objects generation."""
+    prompt = f"""Identify the core technical problem, key technologies, and primary benefits of this invention.
+Return exactly a JSON object with:
+- main_problem: one sentence summary of the problem
+- key_technologies: list of technical domains or components
+- benefits: list of 3-5 technical advantages
+
+ABSTRACT:
+{abstract[:600]}
+
+JSON OUTPUT:"""
     
-    abstract_lower = abstract.lower()
-    
-    # Extract technologies
-    tech_keywords = [
-        'machine learning', 'ai', 'generative model', 'neural network',
-        'iot', 'sensor', 'wireless', 'cloud', 'edge computing',
-        'natural language', 'nlp', 'search', 'retrieval', 'summarization'
-    ]
-    
-    for tech in tech_keywords:
-        if tech in abstract_lower:
-            features['key_technologies'].append(tech)
-    
-    # Extract potential benefits
-    benefit_patterns = [
-        r'(improv\w+|enhanc\w+|optim\w+|reduc\w+|increas\w+|minimi\w+|maximi\w+)',
-        r'(accuracy|efficiency|speed|cost|time|performance|reliability)'
-    ]
-    
-    for pattern in benefit_patterns:
-        matches = re.findall(pattern, abstract_lower)
-        features['benefits'].extend(matches[:3])
-    
-    return features
+    try:
+        response = llm_generate(
+            prompt,
+            max_new_tokens=250,
+            temperature=0.1,
+            system_prompt="You are a patent analysis engine. Output ONLY valid JSON."
+        )
+        
+        json_text = response.strip()
+        if "```json" in json_text:
+            json_text = json_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in json_text:
+            json_text = json_text.split("```")[1].strip()
+            
+        return json.loads(json_text)
+    except Exception as e:
+        print(f"LLM feature extraction failed: {e}")
+        return {
+            'main_problem': 'technical challenges in the field',
+            'key_technologies': ['technology'],
+            'benefits': ['improved performance', 'efficiency'],
+            'applications': []
+        }
 
 
 # ============================================================

@@ -1,86 +1,66 @@
 import re
-from typing import Dict
+import json
+from typing import Dict, List
 from llm_runtime import llm_generate
 
 
 # ============================================================
 # DOMAIN EXTRACTION
 # ============================================================
-def extract_domain_statistics(abstract: str) -> Dict[str, any]:
-    domain_info = {
-        'domain': '',
-        'problem_keywords': [],
+def extract_domain_info(abstract: str) -> Dict[str, any]:
+    """Extract domain, technologies, and invention type using LLM for universal support."""
+    default_info = {
+        'domain': 'technology',
         'technologies': [],
-        'application': ''
+        'invention_type': 'hybrid',
+        'problem_statement': ''
     }
+    
+    prompt = f"""Analyze the following patent abstract to categorize the invention.
+Return exactly a JSON object with these keys:
+- domain: the primary technical field (e.g., "pharmaceuticals", "aerospace", "semiconductors")
+- technologies: list of 2-4 key technologies mentioned
+- invention_type: must be one of "software", "hardware", "chemical", "biological", or "hybrid"
+- problem_statement: a one-sentence summary of the problem this invention solves
 
-    abstract_lower = abstract.lower()
+ABSTRACT:
+{abstract}
 
-    domains = {
-        'renewable energy': [
-            'wind power', 'wind energy', 'renewable energy',
-            'wind turbine', 'power generation', 'generator'
-        ],
-        'power engineering': [
-            'power management', 'energy storage',
-            'inverter', 'battery', 'electrical power'
-        ],
-        'mechanical energy systems': [
-            'rotor', 'blades', 'shaft', 'mechanical',
-            'aerodynamic', 'folding'
-        ],
-        'information retrieval': ['search', 'query', 'retrieval', 'search results', 'summarization', 'information processing'],
-        'natural language processing': ['natural language', 'nlp', 'text processing', 'language model', 'generative model'],
-        'artificial intelligence': ['ai', 'machine learning', 'deep learning', 'neural network'],
-        'wildlife conservation': ['wildlife', 'animal', 'conflict', 'elephant', 'conservation'],
-        'agriculture': ['agricultural', 'farm', 'crop', 'soil', 'irrigation'],
-        'healthcare': ['medical', 'patient', 'diagnosis', 'clinical', 'health'],
-        'industrial': ['industrial', 'manufacturing', 'monitoring', 'safety'],
-        'smart city': ['urban', 'city', 'infrastructure', 'traffic']
-    }
+JSON OUTPUT:"""
 
-    domain_scores = {}
-    for domain, keywords in domains.items():
-        domain_scores[domain] = sum(kw in abstract_lower for kw in keywords)
+    try:
+        response = llm_generate(
+            prompt=prompt,
+            max_new_tokens=300,
+            temperature=0.1,
+            system_prompt="You are a patent classification engine. Output ONLY valid JSON."
+        )
+        
+        json_text = response.strip()
+        if "```json" in json_text:
+            json_text = json_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in json_text:
+            json_text = json_text.split("```")[1].strip()
+            
+        data = json.loads(json_text)
+        return {
+            'domain': data.get('domain', default_info['domain']),
+            'technologies': data.get('technologies', []),
+            'invention_type': data.get('invention_type', 'hybrid'),
+            'problem_statement': data.get('problem_statement', '')
+        }
+    except Exception as e:
+        print(f"LLM domain extraction failed: {e}")
+        # Simplistic fallback
+        return default_info
 
-    best_domain = max(domain_scores, key=domain_scores.get)
-    domain_info['domain'] = best_domain if domain_scores[best_domain] > 0 else "technology"
-
-    tech_patterns = [
-        'IoT', 'LoRaWAN', 'GSM', 'AI', 'machine learning', 'TinyML',
-        'edge computing', 'cloud', 'sensor', 'wireless', 'generative model',
-        'neural network', 'NLP', 'natural language processing'
-    ]
-
-    for tech in tech_patterns:
-        if tech.lower() in abstract_lower:
-            domain_info['technologies'].append(tech)
-
-    return domain_info
-
+# Keep the old names as wrappers or replace their usage for backward compatibility
+def extract_domain_statistics(abstract: str) -> Dict[str, any]:
+    return extract_domain_info(abstract)
 
 def classify_invention_type(abstract: str) -> str:
-    software_keywords = [
-        "algorithm", "software", "model", "neural", "language",
-        "prediction", "classification", "processing", "data"
-    ]
-    hardware_keywords = [
-        "device", "apparatus", "generator", "turbine",
-        "mechanical", "rotor", "battery", "inverter",
-        "sensor", "controller", "circuit", "processor"
-    ]
-
-    text = abstract.lower()
-
-    # Any physical component → HYBRID
-    if any(k in text for k in hardware_keywords):
-        return "hybrid"
-
-    # Purely abstract/software
-    if any(k in text for k in software_keywords):
-        return "software"
-
-    return "hybrid"
+    info = extract_domain_info(abstract)
+    return info['invention_type']
 
 
 # ============================================================
@@ -126,13 +106,17 @@ def validate_background(text: str, domain_info: Dict[str, any], invention_type: 
     word_count = len(text.split())
     text_lower = text.lower()
 
-    if word_count < 300:
-        warnings.append("Background may be brief for a complex invention.")
-    elif word_count > 1000:
-        warnings.append("Background is lengthy (>1000 words). Consider condensing.")
+    if word_count < 200:
+        warnings.append("Background may be too brief.")
+    elif word_count > 600:
+        issues.append("Background is too long (>600 words). Must be concise (300-500 words).")
+    elif word_count > 500:
+        warnings.append("Background is slightly long. Consider condensing to under 500 words.")
 
-    if len(paragraphs) < 4:
-        issues.append("Background should have multiple paragraphs covering prior art and problems.")
+    if len(paragraphs) < 3:
+        issues.append("Background should have at least 3-4 paragraphs.")
+    elif len(paragraphs) > 7:
+        warnings.append("Background has too many paragraphs (>7). Consider condensing to 4-6 paragraphs.")
 
     has_statistics = bool(re.search(r'\d+%|\d+\s*(million|billion)|\d+\s*(units|systems|devices)', text_lower))
 
@@ -223,13 +207,29 @@ Example: "Portable and stationary power generation devices are increasingly requ
 [Paragraph 2-3: Existing hardware-based technologies]
 Example: "Conventional systems employ rigid mechanical assemblies, fixed structural components, and heavy materials that complicate transportation and installation..."
 """
-    else:  # hybrid
-        return """
-[Paragraph 1: Problem statement involving integrated physical and computational systems]
-Example: "Modern systems increasingly combine physical devices with embedded computation and control logic, introducing challenges in coordination, efficiency, and adaptability."
+    elif invention_type == "chemical":
+         return """
+[Paragraph 1: Technical field and molecular/composition challenges]
+Example: "The synthesis and formulation of specialized chemical compositions require precise control over reaction kinetics, stability, and purity to ensure desired technical properties."
 
-[Paragraph 2-3: Existing hybrid hardware-software approaches]
-Example: "Existing solutions integrate mechanical components with embedded controllers, firmware, or software platforms to manage operation and performance..."
+[Paragraph 2-3: Conventional chemical formulations and processes]
+Example: "Traditional formulations often rely on established reactive agents or solvent systems that may present limitations in terms of ecological impact, cost, or functional efficacy..."
+"""
+    elif invention_type == "biological":
+         return """
+[Paragraph 1: Biological context and methodological limitations]
+Example: "Advances in biotechnology require robust methods for processing biological samples, managing genetic variations, or optimizing cellular interactions in controlled environments."
+
+[Paragraph 2-3: Existing biological assays or cultivation methods]
+Example: "Conventional biological protocols utilize standard growth media or enzymatic processes that might lack the specificity or yield required for modern clinical or industrial applications..."
+"""
+    else:  # hybrid or generic
+        return """
+[Paragraph 1: Problem statement involving integrated systems or multi-disciplinary challenges]
+Example: "Modern technical systems often integrate multiple functional layers, introducing challenges in coordination, efficiency, and overall performance."
+
+[Paragraph 2-3: Existing integrated or multi-layered approaches]
+Example: "Existing solutions combine various established techniques or components to manage operation and achieve technical objectives..."
 """
 
 # ============================================================
@@ -248,42 +248,47 @@ INVENTION ABSTRACT:
 DOMAIN: {domain_info.get('domain', 'technology')}
 TECHNOLOGIES: {', '.join(domain_info.get('technologies', [])) if domain_info.get('technologies') else 'N/A'}
 
-REAL PATENT EXAMPLE STRUCTURE:
+STRICT REQUIREMENTS (FOLLOW EXACTLY):
 
-BACKGROUND OF THE INVENTION
-{example_block}
+1. LENGTH: 4-6 paragraphs (300-500 words total) - BE CONCISE
+   ❌ Do NOT write 10+ paragraphs
+   ❌ Do NOT exceed 600 words
 
-[Paragraph 4-5: Limitations and drawbacks of current solutions]
-Example: "However, existing solutions suffer from several limitations..."
-
-[Paragraph 6-7: Additional existing approaches]
-Example: "Other known methods include alternative architectures or configurations..."
-
-[Paragraph 8-9: Further critique of existing solutions]
-Example: "Despite these developments, current systems fail to adequately address..."
-
-[Final Paragraph: Statement of need]
-"Accordingly, there exists a need for..."
-
-STRICT REQUIREMENTS:
-1. Write 5-12 paragraphs (400-800 words total)
-2. Structure must follow:
-   - Para 1-2: Problem statement with scale or severity (quantitative data only if well-known) Include quantitative data only where appropriate
-   - Para 3-4: Existing technologies and how they work
-   - Para 5-7: Limitations, drawbacks, and challenges with current solutions
-   - Para 8-9: Brief mention of other relevant technologies
-   - Para 10-11: Additional critique
+2. STRUCTURE (4-6 paragraphs ONLY):
+   - Para 1: Technical field and general problem (2-3 sentences)
+   - Para 2: Existing technologies/prior art (general description, no specific citations)
+   - Para 3: Limitations and drawbacks of current solutions (specific technical issues)
+   - Para 4: Additional critique OR another existing approach
+   - Para 5 (Optional): Further limitations
    - Final para: MUST end with "Accordingly, there exists a need for..."
 
-3. Use formal, technical, third-person language
-4. Include quantitative data where possible
-5. CRITICAL: DO NOT describe YOUR invention or solution
-6. FORBIDDEN phrases: "the present invention", "our system", "we propose", "this invention"
-7. Final para MUST start with:
-"Accordingly, there exists a need for improved or alternative systems or methods..."
-8. Do NOT copy example sentences verbatim; use them only as guidance.
+3. STATISTICS RULE (CRITICAL):
+   ❌ Do NOT include specific numbers like "40%" or "3.5 billion"
+   ❌ Do NOT cite statistics without documented source
+   ✓ Use general terms: "significant", "substantial", "growing", "widespread"
+   Example: 
+     - BAD: "Over 463 million people suffer from diabetes"
+     - GOOD: "Diabetes affects a substantial portion of the global population"
 
-Write only the background text (no heading). Start with problem statement:
+4. ANTI-REPETITION RULES:
+   ❌ Do NOT repeat the same concept in multiple paragraphs
+   ❌ Do NOT use the same sentence structure repeatedly
+   ❌ Do NOT restate problems already mentioned
+   ✓ Each paragraph must add NEW information
+
+5. STYLE:
+   ✓ Use formal, technical, third-person language
+   ✓ Keep sentences concise (max 25 words per sentence)
+   ✓ Focus on technical problems, not general statements
+   ❌ Do NOT use flowery or marketing language
+   ❌ Do NOT include unnecessary adjectives
+
+6. FORBIDDEN phrases: "the present invention", "our system", "we propose", "this invention"
+
+7. Final paragraph MUST start with:
+   "Accordingly, there exists a need for improved or alternative approaches..."
+
+Write only the background text (no heading). Be CONCISE - aim for 400 words maximum:
 
 The"""
 
@@ -516,3 +521,7 @@ if __name__ == "__main__":
     print("=" * 85)
     print("\n✅ Generation complete!")
     print("=" * 85)
+
+# Add backward compatibility alias at end of file
+generate_background = generate_background_locally
+

@@ -39,3 +39,6 @@ e.json.gz
 Thumbs.db
 models/best_patentbert_cpc_model.pt
 models/best_patentbert_cpc_model.pt
+
+# Environment secrets
+.env

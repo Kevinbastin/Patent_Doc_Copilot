@@ -1,21 +1,6 @@
-from llama_cpp import Llama
 import re
 from typing import Dict, List
-
-
-# Path to your locally downloaded Phi-3 model (.gguf file)
-LLM_PATH = "/workspace/patentdoc-copilot/models/models/phi-3-mini-4k-instruct-q4.gguf"
-
-
-
-# Load the model ONCE at module level
-llm = Llama(
-    model_path=LLM_PATH, device="auto",
-    n_ctx=4096,
-    n_threads=4,
-    n_batch=512,
-    verbose=False
-)
+from llm_runtime import llm_generate
 
 
 def extract_figure_info_from_abstract(abstract: str) -> Dict[str, any]:
@@ -258,16 +243,16 @@ Figure 1:"""
     
     for attempt in range(max_attempts):
         try:
-            response = llm(
+            response = llm_generate(
                 prompt=prompt,
-                max_tokens=600,
+                max_new_tokens=600,
                 temperature=0.2 if attempt == 0 else 0.25 + (attempt * 0.1),
-                stop=["DETAILED DESCRIPTION", "SUMMARY OF", "\n\n\n\n"],
+                stop_strings=["DETAILED DESCRIPTION", "SUMMARY OF", "\n\n\n\n"],
                 top_p=0.85,
                 repeat_penalty=1.2
             )
             
-            raw_text = "Figure 1:" + response["choices"][0]["text"].strip()
+            raw_text = "Figure 1:" + response.strip()
             cleaned_text = clean_brief_description(raw_text)
             validation = validate_brief_description(cleaned_text, num_figures)
             

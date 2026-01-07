@@ -1,4 +1,6 @@
 import re
+import json
+from typing import Dict, List
 from llm_runtime import llm_generate
 
 
@@ -138,74 +140,93 @@ def validate_title(title: str) -> dict:
 
 
 def extract_key_features(abstract: str) -> dict:
-    """Extract key technical features from abstract to guide title generation."""
-    abstract_lower = abstract.lower()
+    """Extract key technical features using LLM to guide title generation."""
+    prompt = f"""Identify the core technical subject and primary function of this invention.
+Return exactly a JSON object with:
+- category: (e.g., "system", "method", "composition", "process")
+- subject: the main technical component or entity
+- function: what it primary does or enables
+- domain: technical field
 
-    features = {
-        "has_sensors": any(w in abstract_lower for w in ['sensor', 'detector', 'monitor']),
-        "has_ml_ai": any(w in abstract_lower for w in ['machine learning', 'ml', 'ai', 'neural', 'prediction']),
-        "has_iot": any(w in abstract_lower for w in ['iot', 'wireless', 'network', 'communication']),
-        "has_control": any(w in abstract_lower for w in ['control', 'automation', 'automated']),
-        "domain": None
-    }
+ABSTRACT:
+{abstract[:600]}
 
-    domains = {
-        'agricultural': ['crop', 'soil', 'irrigation', 'farm', 'agricultural'],
-        'medical': ['medical', 'diagnosis', 'patient', 'health', 'clinical'],
-        'industrial': ['manufacturing', 'industrial', 'production', 'factory'],
-        'environmental': ['environmental', 'pollution', 'climate', 'emission']
-    }
-
-    for domain, keywords in domains.items():
-        if any(kw in abstract_lower for kw in keywords):
-            features['domain'] = domain
-            break
-
-    return features
+JSON OUTPUT:"""
+    
+    try:
+        response = llm_generate(
+            prompt,
+            max_new_tokens=200,
+            temperature=0.1,
+            system_prompt="You are a patent analysis engine. Output ONLY valid JSON."
+        )
+        
+        json_text = response.strip()
+        if "```json" in json_text:
+            json_text = json_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in json_text:
+            json_text = json_text.split("```")[1].strip()
+            
+        return json.loads(json_text)
+    except Exception as e:
+        print(f"LLM feature extraction failed: {e}")
+        return {"category": "system", "subject": "invention", "function": "technical operation", "domain": "technology"}
 
 
 def generate_title_from_abstract(abstract: str, max_attempts: int = 5) -> dict:
-    """Generate a patent-quality title from an abstract."""
+    """Generate a patent-quality title from an abstract per Indian Patent Office requirements."""
     features = extract_key_features(abstract)
+    
+    # Determine if multiple categories apply
+    abstract_lower = abstract.lower()
+    categories = []
+    if any(w in abstract_lower for w in ['system', 'apparatus', 'device', 'assembly']):
+        categories.append('system/apparatus')
+    if any(w in abstract_lower for w in ['method', 'process', 'steps', 'procedure']):
+        categories.append('method/process')
+    if any(w in abstract_lower for w in ['composition', 'compound', 'mixture', 'formulation']):
+        categories.append('composition')
+    
+    scope_hint = " AND ".join(categories) if categories else "SYSTEM"
 
-    feature_guidance = ""
-    if features['has_ml_ai'] and features['has_sensors']:
-        feature_guidance = "- Mention the sensor type AND the ML/AI capability\n"
-    if features['domain']:
-        feature_guidance += f"- Include the application domain ({features['domain']})\n"
+    prompt = f"""You are an Indian Patent Attorney drafting a title per Indian Patent Office (IPO) requirements.
 
-    prompt = f"""You are an expert patent attorney drafting titles per USPTO MPEP 606 and WIPO ST.15 standards.
+INDIAN PATENT OFFICE TITLE REQUIREMENTS:
+1. MAXIMUM 15 WORDS (preferably 8-12 words)
+2. CLEAR AND SPECIFIC - must show purpose/functionality
+3. SHOW SCOPE - indicate if product, process, apparatus, or use
+4. TECHNICAL FOCUS - use technical terms only
+5. NO VAGUE TERMS - avoid "smart", "novel", "improved", "advanced"
+6. NO FANCY NAMES - no trade names, brand names, personal names
+7. NO STARTING ARTICLES - never start with "A", "An", "The"
+8. PRINTABLE CHARACTERS ONLY - standard ASCII
 
-STRICT RULES (violating these makes title INVALID):
-1. 5-12 words total (absolute maximum 15 words)
-2. NO articles at start: "A", "An", "The"
-3. FORBIDDEN WORDS anywhere: "improved", "novel", "new", "innovative", "advanced", "efficient", "smart"
-4. NO ending punctuation (no periods, no commas at end)
-5. NO subjective/marketing terms - only technical descriptors
-6. Must indicate WHAT it is (system/method/apparatus) AND WHAT it does
+DETECTED SCOPE: {scope_hint}
+TECHNICAL DOMAIN: {features.get('domain', 'technology')}
+MAIN SUBJECT: {features.get('subject', 'invention')}
+FUNCTION: {features.get('function', 'operation')}
 
-REQUIRED ELEMENTS:
-- Technical category (System, Method, Apparatus, Device, Circuit, Assembly, Composition, Process)
-- Key innovation or distinguishing feature
-- Application domain or function
-{feature_guidance}
+TITLE STRUCTURE OPTIONS:
+(a) For apparatus: "[Technical Name] APPARATUS/SYSTEM FOR [Function]"
+(b) For method: "METHOD FOR [Technical Function] USING [Key Component]"
+(c) For both: "[Name] SYSTEM AND METHOD FOR [Function]"
 
-GOOD EXAMPLES (study the pattern):
-✓ "MULTI-DEPTH SOIL SENSOR ARRAY WITH PREDICTIVE IRRIGATION CONTROL"
-✓ "WIRELESS AGRICULTURAL MONITORING SYSTEM USING MACHINE LEARNING"
-✓ "IOT-ENABLED CROP MANAGEMENT APPARATUS WITH MULTI-PARAMETER SENSING"
-✓ "METHOD FOR AUTOMATED IRRIGATION SCHEDULING BASED ON SOIL MOISTURE PREDICTION"
+GOOD IPO TITLE EXAMPLES:
+✓ "WATER QUALITY MONITORING SYSTEM WITH MULTI-SENSOR ARRAY" (8 words)
+✓ "PHARMACEUTICAL COMPOSITION FOR TREATING RESPIRATORY DISORDERS" (7 words)
+✓ "METHOD AND APPARATUS FOR REAL-TIME DATA PROCESSING" (8 words)
+✓ "AUTOMATED IRRIGATION SYSTEM FOR PRECISION AGRICULTURE" (7 words)
 
-BAD EXAMPLES (avoid these patterns):
-✗ "An Improved Smart Agricultural System"
-✗ "Novel IoT-Based Monitoring Device"
-✗ "Advanced Precision Agriculture Technology."
-✗ "Efficient Crop Monitoring System"
+BAD EXAMPLES (DO NOT USE):
+✗ "A Novel Smart System..." (starts with article, uses "novel", "smart")
+✗ "Advanced IoT-Based Method..." (uses "advanced")
+✗ "The Improved Device..." (starts with "The", uses "improved")
 
-Abstract to analyze:
-{abstract}
+ABSTRACT:
+{abstract[:500]}
 
-Generate ONLY the patent title (no explanation, no prefix, no quotes):"""
+Generate ONLY the patent title (8-12 words, ALL CAPS, show scope):"""
+
 
     best_result = None
     best_score = -1

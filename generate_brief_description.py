@@ -60,7 +60,7 @@ def clean_brief_description(text: str) -> str:
     )
 
     # Force each Figure onto a new line
-    text = re.sub(r'\s+(Figure\s+\d+:)', r'\n\1', text)
+    text = re.sub(r'\s+(Figure\s+\d+)', r'\n\1', text)
 
     # Clean formatting
     lines = []
@@ -69,12 +69,17 @@ def clean_brief_description(text: str) -> str:
         if not line:
             continue
 
+        # Normalize to "Figure X illustrates" format (no colon)
         line = re.sub(
-            r'^Figure\s*(\d+)\s*:?',
-            r'Figure \1:',
+            r'^Figure\s*(\d+)\s*:?\s*illustrates',
+            r'Figure \1 illustrates',
             line,
             flags=re.IGNORECASE
         )
+        
+        # If still has colon format, convert it
+        if re.match(r'^Figure\s+\d+\s*:', line, re.IGNORECASE):
+            line = re.sub(r'^Figure\s*(\d+)\s*:\s*', r'Figure \1 illustrates ', line, flags=re.IGNORECASE)
 
         if not line.endswith('.'):
             line += '.'
@@ -120,9 +125,9 @@ def validate_brief_description(text: str, expected_count: int = None) -> Dict[st
                 f"Figure {fig_num}: Functional or operational language is not permitted in drawings"
             )
 
-
-        if not re.match(r'^Figure\s+\d+[A-Z]?:\s+', line):
-            issues.append(f"Line {i+1}: Must start with 'Figure X: '")
+        # Accept both "Figure X:" and "Figure X illustrates" formats
+        if not re.match(r'^Figure\s+\d+[A-Z]?\s+(illustrates|:)', line, re.IGNORECASE):
+            issues.append(f"Line {i+1}: Must start with 'Figure X illustrates'")
 
         if "illustrates" not in line.lower():
            issues.append(f"Figure {fig_num}: Must use the word 'illustrates'")
@@ -131,11 +136,11 @@ def validate_brief_description(text: str, expected_count: int = None) -> Dict[st
         if not line.endswith('.'):
             issues.append(f"Figure {fig_num}: Must end with period")
 
-        if any(word in line.lower() for word in ['system', 'block diagram', 'setup', 'apparatus', 'device']):
-            if 'according to the present invention' not in line.lower():
+        # Check for "in accordance with" or "according to" for structural figures
+        if any(word in line.lower() for word in ['system', 'block diagram', 'setup', 'apparatus', 'device', 'view']):
+            if 'in accordance with' not in line.lower() and 'according to the present invention' not in line.lower():
                 warnings.append(
-                    f"Figure {fig_num}: Consider ending system figures with "
-                    f"'according to the present invention' for formality"
+                    f"Figure {fig_num}: Consider adding 'in accordance with an embodiment of the present invention'"
                 )
 
 
@@ -165,46 +170,58 @@ def generate_brief_description(
     if num_figures is None:
         num_figures = fig_info['suggested_count']
 
-    prompt = f"""You are a senior patent attorney drafting the "Brief Description of the Drawings"
-for an Indian Complete Specification patent.
+    # Extract invention name from abstract (just the main noun phrase)
+    invention_name = "the present invention"
+    # Try to extract: "A [device/system/apparatus]" up to "comprising" or first comma
+    match = re.search(r'^A\s+([a-zA-Z\s]+?)(?:\s+comprising|\s+for|\s+with|,|\.)', abstract, re.IGNORECASE)
+    if match:
+        invention_name = "the " + match.group(1).strip().lower()
+    else:
+        # Fallback: get first 3-5 words after "A"
+        match = re.search(r'^A\s+((?:\w+\s*){1,4})', abstract, re.IGNORECASE)
+        if match:
+            invention_name = "the " + match.group(1).strip().lower()
+    
+    prompt = f"""You are a senior patent attorney drafting the "Brief Description of the Drawings" for an Indian Complete Specification patent.
 
-INVENTION ABSTRACT:
-{abstract[:1000]}
+INVENTION NAME: {invention_name}
+INVENTION ABSTRACT: {abstract[:800]}
 
-{f"USER INFO: {figure_descriptions}" if figure_descriptions else ""}
+{f"USER DRAWING NOTES: {figure_descriptions}" if figure_descriptions else ""}
 
 NUMBER OF FIGURES TO GENERATE: {num_figures}
 
-REFERENCE PATENT EXAMPLES:
-Figure 1: illustrates a block diagram of a system according to the present invention.
-Figure 2: illustrates an arrangement of primary components according to the present invention.
-Figure 3: illustrates a control unit coupled to system components according to the present invention.
-Figure 4: illustrates a cross-sectional view of internal components according to the present invention.
-Figure 5: illustrates an exploded view of the system components according to the present invention.
+=== TRANSFORMATION LOGIC ===
+Transform simple drawing notes into formal patent language:
 
-MANDATORY RULES:
-1. Format MUST be exactly: "Figure X: illustrates [description]."
-2. Use lowercase "illustrates" only.
-3. Write EXACTLY {num_figures} figures — no more, no less.
-4. Figures MUST be numbered sequentially from Figure 1 to Figure {num_figures}.
-5. Each figure description MUST be on a separate line.
-6. System / apparatus / setup / block diagram figures MUST end with:
-   "according to the present invention."
-7. Data / graph / comparison figures MUST NOT include
-   "according to the present invention."
-8. Do NOT write "Figure X is".
-9. Do NOT include headings, explanations, or blank lines.
-10. Do NOT stop after Figure 1 — continue until Figure {num_figures}.
-11. DO NOT use "is", "FIG.", "FIGURE", or "illustrating".
-    ONLY use: "Figure X: illustrates ..."
+INPUT: Fig 1: Front view of bottle
+OUTPUT: Figure 1 illustrates a front view of {invention_name}, in accordance with an embodiment of the present invention.
 
-NOW WRITE ONLY THE FIGURE DESCRIPTIONS
-(one line per figure, no heading, no extra text):
+INPUT: Fig 2: Top view showing cap
+OUTPUT: Figure 2 illustrates a top planar view of {invention_name} showing the cap assembly, in accordance with an embodiment of the present invention.
 
-Each line MUST begin exactly with:
-Figure X: illustrates
+INPUT: Fig 3: Exploded view
+OUTPUT: Figure 3 illustrates an exploded perspective view of {invention_name}, depicting the internal component arrangement, in accordance with an embodiment of the present invention.
 
-"""
+INPUT: Fig 4: Flowchart of app
+OUTPUT: Figure 4 illustrates a flowchart depicting the method of operation of {invention_name}.
+
+INPUT: Fig 5: Block diagram
+OUTPUT: Figure 5 illustrates a block diagram of the system architecture of {invention_name}, in accordance with an embodiment of the present invention.
+
+=== MANDATORY FORMAT ===
+- Line format: "Figure X illustrates [a/an] [view type] [of invention name], [context phrase]."
+- Use "illustrates" (not "is" or "shows")
+- Add view qualifiers: "front", "side", "top planar", "perspective", "cross-sectional", "exploded"
+- Include invention name: "{invention_name}"
+- End structural figures with: "in accordance with an embodiment of the present invention."
+- End flowcharts/method figures with: "depicting the method of [action] of {invention_name}."
+- Each figure on separate line
+- Write exactly {num_figures} figures (Figure 1 to Figure {num_figures})
+
+NOW GENERATE {num_figures} FIGURE DESCRIPTIONS (one per line):
+
+Figure 1 illustrates"""
 
 
     best_result = None

@@ -1,9 +1,21 @@
-streamlit
-transformers
-torch
-faiss-cpu
-sentence-transformers
-python-docx
-reportlab
-requests
-toml
+# PatentDoc Co-Pilot - Dependencies
+# For deployment on Streamlit Cloud, Hugging Face Spaces, or Docker
+
+# Core Framework
+streamlit>=1.28.0
+
+# Document Processing
+python-docx>=0.8.11
+reportlab>=4.0.0
+Pillow>=10.0.0
+
+# AI/ML
+sentence-transformers>=2.2.0
+faiss-cpu>=1.7.4
+crewai>=0.1.0
+langchain>=0.1.0
+
+# API & Utilities
+requests>=2.31.0
+python-dotenv>=1.0.0
+toml>=0.10.2

@@ -7,41 +7,26 @@ from llm_runtime import llm_generate
 # DOMAIN & FEATURE EXTRACTION
 # ============================================================
 def extract_technical_domain(abstract: str) -> str:
-    """Extract the primary technical domain from the abstract."""
-    common_domains = {
-        "artificial intelligence": ["ai", "machine learning", "neural network", "deep learning", "ml", "generative model"],
-        "information retrieval": ["search", "query", "retrieval", "summarization", "information processing", "search results"],
-        "natural language processing": ["natural language", "nlp", "text processing", "language model"],
-        "computer science": ["computer", "software", "algorithm", "computation"],
-        "telecommunications": ["wireless", "network", "communication", "5g", "antenna"],
-        "renewable energy": [
-            "wind power", "wind energy", "renewable energy", "turbine",
-            "power generation", "generator", "energy conversion"
-        ],
-        "power engineering": [
-            "power system", "power management", "electrical power",
-            "energy storage", "inverter", "battery"
-        ],
-        "electrical engineering": ["circuit", "electrical", "electronic", "power"],
-        "mechanical engineering": ["mechanical", "engine", "mechanism", "manufacturing"],
-        "biotechnology": ["biotech", "genetic", "protein", "dna", "biological"],
-        "pharmaceutical": ["drug", "pharmaceutical", "medicine", "therapeutic"],
-        "medical devices": ["medical device", "diagnostic", "imaging", "surgical"],
-        "semiconductor": ["semiconductor", "chip", "integrated circuit", "transistor"],
-        "chemical engineering": ["chemical", "catalyst", "reaction", "synthesis"],
-        "materials science": ["material", "composite", "polymer", "alloy"],
-        "automotive": ["automotive", "vehicle", "automobile", "engine"],
-        "aerospace": ["aerospace", "aircraft", "aviation", "flight"]
-    }
+    """Extract the primary technical domain from the abstract using LLM."""
+    prompt = f"""Identify the primary technical domain for this patent abstract (e.g., "telecommunications", "biotechnology", "artificial intelligence").
+Return ONLY the domain name in 1-3 words.
+
+ABSTRACT:
+{abstract[:500]}
+
+DOMAIN:"""
     
-    abstract_lower = abstract.lower()
-    
-    # Check for domain matches (prioritize more specific domains first)
-    for domain, keywords in common_domains.items():
-        if any(kw in abstract_lower for kw in keywords):
-            return domain
-    
-    return "technology"
+    try:
+        domain = llm_generate(
+            prompt,
+            max_new_tokens=10,
+            temperature=0.1,
+            system_prompt="You are a patent domain classifier. Output ONLY the domain name."
+        ).strip().lower().rstrip('.')
+        return domain or "technology"
+    except Exception as e:
+        print(f"LLM domain extraction failed: {e}")
+        return "technology"
 
 
 # ============================================================
@@ -49,6 +34,43 @@ def extract_technical_domain(abstract: str) -> str:
 # ============================================================
 def clean_field_text(text: str) -> str:
     """Clean and format the generated field of invention text."""
+    
+    # Strip common model 'thinking' patterns
+    thinking_patterns = [
+        r"^Okay,?\s+(?:the user|I need|let me|I'll).*?(?:\.\s*|\n)",
+        r"^Let me (?:start|analyze|think|draft|understand).*?(?:\.\s*|\n)",
+        r"^I need to.*?(?:\.\s*|\n)",
+        r"^First,? I(?:'ll| will| should).*?(?:\.\s*|\n)",
+        r"^(?:Understood|Got it|Alright).*?(?:\.\s*|\n)",
+        r"^The (?:user|abstract) (?:wants|provides|mentions).*?(?:\.\s*|\n)",
+        r'Field of the Invention"\s*section.*?(?:\.\s*|\n)',
+        r"^.*?requirements.*?(?:\.\s*|\n)",
+    ]
+    for pattern in thinking_patterns:
+        text = re.sub(pattern, '', text, flags=re.IGNORECASE | re.MULTILINE)
+    
+    # Also strip mid-sentence chatter like ", okay, let's tackle this query. "
+    mid_sentence_chatter = [
+        r",?\s*okay,?\s*let'?s\s+(?:tackle|address|handle|work on)[^.]*\.\s*(?:the\s+)?",
+        r",?\s*let me\s+(?:think|consider|analyze)[^.]*\.\s*",
+        r",?\s*I'?ll\s+(?:draft|write|generate)[^.]*\.\s*",
+        r"\s+okay,?\s*let'?s\s+(?:tackle|see)[^.]*\.\s*(?:the\s+)?",
+        r"\s+okay,?\s+",
+        r"\bokay,?\s*let'?s\s+(?:tackle|see|address)[^.]*\.\s*(?:the\s+user\s*,?\s*)?",
+    ]
+    for pattern in mid_sentence_chatter:
+        text = re.sub(pattern, ' ', text, flags=re.IGNORECASE)
+    
+    # Clean up "the user," artifacts
+    text = re.sub(r'\bthe\s+user\s*,?\s*', '', text, flags=re.IGNORECASE)
+    
+    # Ensure it starts with proper phrasing
+    if not re.match(r'^(?:The present|This invention|The present disclosure)', text, re.IGNORECASE):
+        # Try to find proper start
+        match = re.search(r'(?:The present invention|This invention|The present disclosure)', text, re.IGNORECASE)
+        if match:
+            text = text[match.start():]
+    
     # Remove common prefixes
     text = re.sub(
         r'(The present invention\s*){2,}',
@@ -56,7 +78,6 @@ def clean_field_text(text: str) -> str:
         text,
         flags=re.IGNORECASE
     )
-
     
     # Remove extra whitespace and newlines
     text = ' '.join(text.split())
@@ -140,48 +161,34 @@ def generate_field_of_invention(abstract: str, max_attempts: int = 3) -> Dict[st
     technical_domain = extract_technical_domain(abstract)
     
     # Enhanced prompt with patent-specific instructions and examples
-    prompt = f"""You are an expert patent attorney drafting an Indian patent application.
+    prompt = f"""You are an expert Indian Patent Attorney drafting a patent application.
 
-TASK: Write ONLY the "Field of the Invention" section based on the abstract below.
+TASK: Write the "Field of the Invention" section (40-80 words, 3 sentences).
 
-IMPORTANT:
-- Output MUST contain ONLY English ASCII characters.
-- Do NOT generate Chinese, Japanese, Korean, or any non-English language.
-- If unsure, STOP the sentence instead of switching language.
+MANDATORY STRUCTURE (follow exactly):
+
+SENTENCE 1: "The present invention relates generally to [BROAD TECHNICAL FIELD]."
+SENTENCE 2: "More particularly, the present invention relates to [SPECIFIC TECHNICAL AREA] for [APPLICATION/PURPOSE]."
+SENTENCE 3: "The invention specifically pertains to [KEY TECHNICAL FEATURES mentioned in abstract]."
 
 REQUIREMENTS:
-1. Use formal, technical language (third person, present tense)
-2. Start with standard phrases:
-   - "The present invention relates generally to..."
-   - "This invention pertains to..."
-   - "The present disclosure relates to..."
-3. Be concise: 2-3 sentences, 40-80 words total
-4. State the technical field broadly, then narrow to specific area
-5. Include the specific application or technology mentioned
-6. Do NOT include technical details, advantages, or how it works
-7. Do NOT use marketing language (novel, innovative, revolutionary, etc.)
-8. Do NOT repeat the abstract verbatim
+- EXACTLY 3 sentences, 40-80 words total (CRITICAL - count your words)
+- Start with "The present invention relates generally to..."
+- Second sentence uses "More particularly"
+- Third sentence uses "specifically pertains to"
+- NO technical details, advantages, or how it works
+- NO marketing language (novel, innovative, advanced, etc.)
+- Use formal, technical language
 
-GOOD EXAMPLES:
+GOOD EXAMPLE (65 words, 3 sentences):
+"The present invention relates generally to the field of environmental monitoring systems. More particularly, the present invention relates to water quality assessment systems incorporating multiple sensor arrays for real-time parameter measurement. The invention specifically pertains to monitoring systems utilizing machine learning algorithms for data analysis and cloud-based connectivity for remote alerts and data visualization."
 
-Example 1:
-"The present invention relates generally to wireless communication systems, and more particularly to methods and apparatus for improving signal transmission in 5G networks."
-
-Example 2:
-"This invention pertains to the field of medical imaging, specifically to enhanced MRI scanning techniques for early disease detection."
-
-Example 3:
-"The present disclosure relates to artificial intelligence systems, and more specifically to machine learning models for natural language processing and text generation."
-
-Example 4:
-"The present invention relates generally to information retrieval systems, particularly to methods and systems for generating natural language summaries of search results using generative language models with factual verification."
-
-INVENTION ABSTRACT:
+ABSTRACT TO ANALYZE:
 {abstract.strip()}
 
-Now write ONLY the Field of the Invention text (no heading, no extra explanation, just the 2-3 sentences):
+Write the Field of Invention (3 sentences, 40-80 words):
 
-The present invention"""
+The present invention relates generally to"""
 
     best_result = None
     best_score = float('inf')
@@ -217,8 +224,20 @@ The present invention"""
                 print("Empty response")
                 continue
             
-            # Prepend "The present invention" since we prompted with it
+            # Prepend "The present invention" if not already starting with it
             full_text = raw_text.strip()
+            full_text_lower = full_text.lower()
+            
+            # Add proper start if missing
+            if not full_text_lower.startswith("the present invention") and \
+               not full_text_lower.startswith("this invention") and \
+               not full_text_lower.startswith("the present disclosure"):
+                # Check if it starts with "relates" - prepend properly
+                if full_text_lower.startswith("relates"):
+                    full_text = "The present invention " + full_text
+                else:
+                    full_text = "The present invention relates to " + full_text
+            
             cleaned_text = clean_field_text(full_text)
             validation = validate_field_text(cleaned_text)
             

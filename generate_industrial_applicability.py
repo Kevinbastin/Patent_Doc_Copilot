@@ -29,14 +29,18 @@ STRICT REQUIREMENTS (MANDATORY):
 2. Start EXACTLY with the sentence:
    "The present invention is capable of industrial application and can be made or used in industry in accordance with the provisions of the Indian Patent Act."
 3. Clearly indicate that the invention can be manufactured or used in industry.
-4. If a FIELD OF INVENTION is provided, mention it once.
-5. Otherwise, describe applicability in a broad and non-limiting manner across industrial sectors.
+4. DOMAIN CONSTRAINT: Industrial applicability MUST be limited to the SAME field as the invention.
+   - If the abstract describes a "glucose monitoring ring", mention healthcare/medical devices.
+   - If the abstract describes a "hydraulic valve", mention industrial machinery.
+   - Do NOT mention unrelated industries (e.g., water treatment for a glucose ring).
+5. If a FIELD OF INVENTION is provided, use ONLY that field.
 6. Do NOT mention:
    - advantages
    - performance improvements
    - results or benefits
    - comparison with prior art
    - algorithms, software, AI, or machine learning
+   - unrelated industries or applications
 7. Use formal patent drafting language only.
 8. Length: 80–150 words.
 
@@ -85,12 +89,14 @@ The present invention is capable of industrial application"""
             best_score = score
             best_result = result
 
+    # Pass field to fallback for domain-specific text
+    fallback_text = fallback_industrial_applicability(field_of_invention)
     return best_result if best_result else {
-        "text": fallback_industrial_applicability(),
+        "text": fallback_text,
         "valid": True,
         "issues": [],
         "warnings": ["Fallback text used"],
-        "word_count": len(fallback_industrial_applicability().split()),
+        "word_count": len(fallback_text.split()),
         "attempt": max_attempts,
         "score": 0
     }
@@ -166,15 +172,24 @@ def validate_industrial_applicability(text: str) -> Dict[str, any]:
 # ============================================================
 # FALLBACK (EXAMINER-SAFE)
 # ============================================================
-def fallback_industrial_applicability() -> str:
-    return (
-        "The present invention is capable of industrial application and can be "
-        "made or used in industry in accordance with the provisions of the Indian "
-        "Patent Act. The invention may be manufactured, implemented, or utilized "
-        "in various industrial environments where systems, apparatus, or processes "
-        "of the disclosed type are employed, without limitation to a particular "
-        "industry, and is suitable for adoption across diverse technical and industrial sectors."
-    )
+def fallback_industrial_applicability(field: str = "") -> str:
+    """Generate domain-specific fallback instead of generic text."""
+    if field:
+        return (
+            f"The present invention is capable of industrial application and can be "
+            f"made or used in industry in accordance with the provisions of the Indian "
+            f"Patent Act. The invention is particularly applicable in the field of {field}, "
+            f"where it may be manufactured, implemented, or utilized by those skilled in the art. "
+            f"The invention is suitable for adoption in industries related to {field} and allied sectors."
+        )
+    else:
+        return (
+            "The present invention is capable of industrial application and can be "
+            "made or used in industry in accordance with the provisions of the Indian "
+            "Patent Act. The invention may be manufactured, implemented, or utilized "
+            "in industrial environments relevant to the disclosed technical field, "
+            "and is suitable for adoption by those skilled in the art."
+        )
 
 
 
@@ -193,7 +208,8 @@ def industrial_applicability_from_abstract(
     if result["valid"]:
         return result["text"]
 
-    return fallback_industrial_applicability()
+    # Pass field to fallback for domain-specific text
+    return fallback_industrial_applicability(field_of_invention)
 
 
 
